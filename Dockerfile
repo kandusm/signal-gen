@@ -44,12 +44,21 @@ FROM build AS prune
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
     && pnpm --filter @signalgen/service exec prisma generate \
     && rm -rf /app/apps/service/test /app/apps/service/src /app/packages/contract/test \
-              /app/packages/contract/src /app/docs
+              /app/packages/contract/src /app/docs \
+    # Defence in depth. .dockerignore should already have kept every .env out
+    # of the build context; this makes certain none reached the image, because
+    # a stale or mis-scoped ignore pattern is a silent credential leak.
+    && find /app \( -name '.env' -o -name '.env.*' \) ! -name '.env.example' -delete
 
 
 # --- runtime ---------------------------------------------------------------
 FROM base AS runtime
 ENV NODE_ENV=production
+# build-plan.md §9: all storage and wire timestamps are UTC ISO-8601. Pinning
+# the container clock to UTC means a Date formatted without an explicit zone
+# cannot quietly pick up the host's. The Timestamptz columns enforce the same
+# thing at the database.
+ENV TZ=UTC
 COPY --from=prune --chown=node:node /app /app
 
 # WORKDIR is the service package so the release command in fly.toml can be the

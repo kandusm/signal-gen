@@ -6,54 +6,59 @@ import {
   TokenBucket,
   buildDmPayload,
   buildSignalId,
+  deriveShortcode,
   fingerprintFor,
-  shortcodeFor,
 } from '../src/dm';
 
-describe('shortcodeFor', () => {
-  it('uses the registered shortcodes', () => {
-    expect(shortcodeFor('manual')).toBe('man');
-    expect(shortcodeFor('reddit')).toBe('rdt');
-  });
-
-  it('derives a shortcode for an unregistered adapter', () => {
-    // So a Phase 2 adapter cannot produce a malformed id before someone
-    // remembers to register it.
-    expect(shortcodeFor('calendar')).toBe('cal');
-    expect(shortcodeFor('Google-Trends')).toBe('goo');
+describe('deriveShortcode', () => {
+  it('derives a shortcode for an adapter config has not registered', () => {
+    // The configured ADAPTER_SHORTCODES map is the real source; this is the
+    // fallback that keeps a new adapter from producing a malformed id before
+    // someone remembers to add it.
+    expect(deriveShortcode('calendar')).toBe('cale');
+    expect(deriveShortcode('Google-Trends')).toBe('goog');
   });
 
   it('refuses an adapter key with nothing to derive from', () => {
-    expect(() => shortcodeFor('---')).toThrow();
+    expect(() => deriveShortcode('---')).toThrow();
   });
 });
 
 describe('buildSignalId', () => {
-  it('formats as shortcode_ULID', () => {
-    expect(buildSignalId('manual', '01J8ZYXWVUTSRQPONMLKJIHGFE')).toBe(
+  it('formats as shortcode_ULID using the shortcode it is given', () => {
+    expect(buildSignalId('manual', 'man', '01J8ZYXWVUTSRQPONMLKJIHGFE')).toBe(
       'man_01J8ZYXWVUTSRQPONMLKJIHGFE',
+    );
+    expect(buildSignalId('search', 'srch', '01J8ZYXWVUTSRQPONMLKJIHGFE')).toBe(
+      'srch_01J8ZYXWVUTSRQPONMLKJIHGFE',
+    );
+  });
+
+  it('falls back to a derived shortcode when config supplies none', () => {
+    expect(buildSignalId('manual', undefined, '01J8ZYXWVUTSRQPONMLKJIHGFE')).toBe(
+      'manu_01J8ZYXWVUTSRQPONMLKJIHGFE',
     );
   });
 
   it('stays inside the 64-character contract limit', () => {
-    const id = buildSignalId('reddit');
+    const id = buildSignalId('search', 'srch');
     expect(id.length).toBeLessThanOrEqual(SIGNAL_ID_MAX_LENGTH);
     expect(dmSignalPayloadSchema.shape.signalId.safeParse(id).success).toBe(true);
   });
 
   it('is unique across calls', () => {
-    const ids = new Set(Array.from({ length: 500 }, () => buildSignalId('manual')));
+    const ids = new Set(Array.from({ length: 500 }, () => buildSignalId('manual', 'man')));
     expect(ids.size).toBe(500);
   });
 
   it('sorts lexicographically by creation order, as ULIDs should', () => {
-    const first = buildSignalId('manual', '01J8ZYXWVUTSRQPONMLKJIHGFE');
-    const second = buildSignalId('manual', '01J8ZYXWVUTSRQPONMLKJIHGFF');
+    const first = buildSignalId('manual', 'man', '01J8ZYXWVUTSRQPONMLKJIHGFE');
+    const second = buildSignalId('manual', 'man', '01J8ZYXWVUTSRQPONMLKJIHGFF');
     expect([second, first].sort()).toEqual([first, second]);
   });
 
   it('rejects an id that would exceed the contract limit', () => {
-    expect(() => buildSignalId('manual', 'x'.repeat(SIGNAL_ID_MAX_LENGTH))).toThrow(/64/);
+    expect(() => buildSignalId('manual', 'man', 'x'.repeat(SIGNAL_ID_MAX_LENGTH))).toThrow(/64/);
   });
 });
 
@@ -71,9 +76,9 @@ describe('fingerprintFor', () => {
   });
 
   it('separates adapters, so per-source suppression windows can differ', () => {
-    // architecture-spec.md section 8 gives reddit a 21-day window and manual a
+    // architecture-spec.md section 8 gives search a 21-day window and manual a
     // 7-day one; that only works if the adapter is part of the hash.
-    expect(fingerprintFor({ ...base, adapterKey: 'reddit' })).not.toBe(fingerprintFor(base));
+    expect(fingerprintFor({ ...base, adapterKey: 'search' })).not.toBe(fingerprintFor(base));
   });
 
   it('distinguishes a missing subtopic from an empty one consistently', () => {

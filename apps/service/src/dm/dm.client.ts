@@ -12,6 +12,14 @@ import { SignalRepository, SignalStatus } from '../persistence';
 import { BudgetService } from './budget.service';
 import { DmHttpClient, type DmHttpResult } from './dm.http';
 import { fingerprintFor } from './fingerprint';
+import {
+  type LedgerResponse,
+  describeLedgerResponse,
+  fromDmResponse,
+  fromSchemaRejection,
+  fromToneRejection,
+  fromTransportError,
+} from './ledger-response';
 import { buildDmPayload } from './payload.builder';
 import { RateLimitService } from './rate-limit.service';
 import { MAX_ATTEMPTS, classifyStatus, nextRetryDelayMs, parseRetryAfterSeconds } from './retry';
@@ -73,7 +81,10 @@ export class DmClient {
    *   6. rate guards, then POST   see dispatch()
    */
   async postSignal(candidate: CandidateSignal): Promise<DispatchResult> {
-    const signalId = buildSignalId(candidate.adapterKey);
+    const signalId = buildSignalId(
+      candidate.adapterKey,
+      this.config.shortcodeFor(candidate.adapterKey),
+    );
     const sourceKey = this.config.generatorSourceKey;
     const payload = buildDmPayload(candidate, { signalId, sourceKey });
 
@@ -94,13 +105,16 @@ export class DmClient {
     // (3) Our own wire-contract check.
     const parsed = dmSignalPayloadSchema.safeParse(payload);
     if (!parsed.success) {
-      const details = parsed.error.issues
-        .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
-        .join('; ');
-      this.logger.error(`Schema rejected ${signalId}: ${details}`);
+      const issues = parsed.error.issues.map((issue) => ({
+        path: issue.path.join('.') || '(root)',
+        message: issue.message,
+      }));
+      this.logger.error(
+        `Schema rejected ${signalId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`,
+      );
       await this.signals.finalize(signalId, {
         status: SignalStatus.REJECTED_SCHEMA,
-        dmResponse: details.slice(0, 2000),
+        dmResponse: fromSchemaRejection(issues),
       });
       return { signalId, status: SignalStatus.REJECTED_SCHEMA };
     }
@@ -112,7 +126,7 @@ export class DmClient {
       this.logger.error(`Tone "${candidate.tone}" rejected for ${signalId}`);
       await this.signals.finalize(signalId, {
         status: SignalStatus.REJECTED_TONE,
-        dmResponse: `Tone "${candidate.tone}" is not in the DM taxonomy`,
+        dmResponse: fromToneRejection(candidate.tone, knownTones),
       });
       // One alert per adapter per day: a drift hits every candidate an adapter
       // emits, and the first one carries all the information.
@@ -196,7 +210,7 @@ export class DmClient {
     // No response at all: retryable transport failure.
     if (result.kind === 'transport_error') {
       return this.scheduleOrFail(signal, attemptsMade, {
-        dmResponse: `transport error: ${result.message}`,
+        dmResponse: fromTransportError(result.message),
       });
     }
 
@@ -213,7 +227,7 @@ export class DmClient {
         } else if (!parsed.data.matchingScheduled) {
           this.logger.warn(`${signal.id}: accepted but matchingScheduled=false`);
         }
-        return this.markPosted(signal, result.status, result.rawBody);
+        return this.markPosted(signal, result.status, fromDmResponse(result));
       }
 
       case 'duplicate': {
@@ -225,12 +239,12 @@ export class DmClient {
           `${signal.id}: DM reports DUPLICATE on attempt ${attemptsMade}` +
             (parsed.success ? ` (originally captured ${parsed.data.originalCapturedAt})` : ''),
         );
-        return this.markPosted(signal, result.status, result.rawBody);
+        return this.markPosted(signal, result.status, fromDmResponse(result));
       }
 
       case 'accepted_undocumented': {
         this.logger.warn(`${signal.id}: undocumented success status ${result.status}`);
-        return this.markPosted(signal, result.status, result.rawBody);
+        return this.markPosted(signal, result.status, fromDmResponse(result));
       }
 
       case 'rate_limited': {
@@ -262,7 +276,7 @@ export class DmClient {
           if (!this.rateLimit.tryAcquire()) {
             return this.scheduleOrFail(signal, attemptsMade, {
               dmStatusCode: result.status,
-              dmResponse: result.rawBody,
+              dmResponse: fromDmResponse(result),
             });
           }
           return this.attempt(signal, inlineRetries + 1);
@@ -271,17 +285,18 @@ export class DmClient {
         // Too long to wait inline, or we already retried once.
         return this.scheduleOrFail(signal, attemptsMade, {
           dmStatusCode: result.status,
-          dmResponse: result.rawBody,
+          dmResponse: fromDmResponse(result),
           overrideDelayMs: waitMs > 0 ? waitMs : undefined,
         });
       }
 
       case 'permanent': {
         this.logger.error(`${signal.id}: permanent failure, HTTP ${result.status}`);
+        const body = fromDmResponse(result);
         await this.signals.finalize(signal.id, {
           status: SignalStatus.FAILED_PERMANENT,
           dmStatusCode: result.status,
-          dmResponse: result.rawBody,
+          dmResponse: body,
         });
         await this.notify.send({
           kind: 'permanent_failure',
@@ -289,7 +304,7 @@ export class DmClient {
           status: SignalStatus.FAILED_PERMANENT,
           adapterKey: signal.adapterKey,
           dmStatusCode: result.status,
-          dmResponse: result.rawBody || undefined,
+          dmResponse: describeLedgerResponse(body),
         });
         return { signalId: signal.id, status: SignalStatus.FAILED_PERMANENT };
       }
@@ -297,7 +312,7 @@ export class DmClient {
       case 'retryable': {
         return this.scheduleOrFail(signal, attemptsMade, {
           dmStatusCode: result.status,
-          dmResponse: result.rawBody,
+          dmResponse: fromDmResponse(result),
         });
       }
     }
@@ -306,12 +321,12 @@ export class DmClient {
   private async markPosted(
     signal: Signal,
     statusCode: number,
-    rawBody: string,
+    body: LedgerResponse,
   ): Promise<DispatchResult> {
     await this.signals.finalize(signal.id, {
       status: SignalStatus.POSTED,
       dmStatusCode: statusCode,
-      dmResponse: rawBody,
+      dmResponse: body,
       postedAt: this.now(),
     });
     this.logger.log(`${signal.id}: posted (HTTP ${statusCode})`);
@@ -328,7 +343,7 @@ export class DmClient {
     attemptsMade: number,
     outcome: {
       dmStatusCode?: number | undefined;
-      dmResponse?: string | undefined;
+      dmResponse?: LedgerResponse | undefined;
       overrideDelayMs?: number | undefined;
     },
   ): Promise<DispatchResult> {
@@ -347,7 +362,7 @@ export class DmClient {
         status: SignalStatus.FAILED,
         adapterKey: signal.adapterKey,
         attempts: attemptsMade,
-        lastError: outcome.dmResponse || undefined,
+        lastError: describeLedgerResponse(outcome.dmResponse),
       });
       return { signalId: signal.id, status: SignalStatus.FAILED };
     }

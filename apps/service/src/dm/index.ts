@@ -6,6 +6,7 @@ export * from './retry';
 export * from './budget.service';
 export * from './rate-limit.service';
 export * from './dm.http';
+export * from './ledger-response';
 export * from './taxonomy.service';
 export * from './dm.client';
 export * from './sweep.service';

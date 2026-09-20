@@ -1,20 +1,13 @@
 // Data model per docs/architecture-spec.md §7.
 //
-// Two documented deviations, both required by the Phase 0 brief:
+// One documented deviation: `Signal.nextAttemptAt`, added by the Phase 0
+// brief so the sweep can own the retry schedule.
 //
-//   Signal.adapterKey    §7 carries only `sourceKey`, but the brief redefines
-//                        sourceKey as the *generator* identity
-//                        (GENERATOR_SOURCE_KEY, one value per deployment) to
-//                        match dm-contract.md. Per-adapter 24h budgets are
-//                        therefore uncountable without a separate adapter
-//                        column.
-//   Signal.nextAttemptAt Explicitly added by the brief; the sweep uses it to
-//                        own the retry schedule.
-//
-// One documented omission: §7's `DailyBudget` model is absent. The brief
-// resolves OQ-3 by counting a trailing 24h window off the Signal ledger, which
-// makes a calendar-day counter table both redundant and wrong-keyed. See
-// BudgetService for why trailing-24h is safe under either reading of OQ-3.
+// All DateTime columns are `Timestamptz(3)`. Prisma's default mapping is a
+// bare `timestamp`, which stores no zone and silently depends on the server's
+// TZ setting. build-plan.md §9 requires all storage timestamps to be UTC
+// ISO-8601, so the zone is made explicit at the column rather than assumed
+// from the environment. The container also pins TZ=UTC.
 
 generator client {
   provider = "prisma-client-js"
@@ -50,16 +43,17 @@ model Signal {
   status        String
   attempts      Int       @default(0)
   dmStatusCode  Int?
-  /// Parsed DM response body, or the transport error text when there was no
-  /// response at all.
-  dmResponse    String?
+  /// Parsed DM response body, or a structured description of why there was
+  /// no usable response. JSON rather than text so a contract drift can be
+  /// queried across the ledger instead of grepped.
+  dmResponse    Json?
   /// When the sweep may next touch this row. Null means "eligible now".
-  nextAttemptAt DateTime?
-  createdAt     DateTime  @default(now())
-  postedAt      DateTime?
+  nextAttemptAt DateTime? @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  postedAt      DateTime? @db.Timestamptz(3)
 
   @@index([fingerprint])
-  @@index([sourceKey, createdAt])
+  @@index([adapterKey, createdAt])
   // Trailing-24h budget counting, total and per adapter.
   @@index([status, postedAt])
   @@index([adapterKey, status, postedAt])
@@ -70,21 +64,21 @@ model Signal {
 /// Dedup state. Written by the Phase 1 pipeline; present in Phase 0 so the
 /// initial migration matches §7 and Phase 1 adds no table.
 model Fingerprint {
-  /// sha256 of the normalized (adapterKey|topic|subtopic) tuple.
+  /// sha256(adapterKey | adapter-defined material) per architecture-spec.md §8.
   hash               String    @id
-  sourceKey          String
-  firstSeenAt        DateTime
-  lastSeenAt         DateTime
+  adapterKey         String
+  firstSeenAt        DateTime  @db.Timestamptz(3)
+  lastSeenAt         DateTime  @db.Timestamptz(3)
   lastPostedSignalId String?
-  suppressUntil      DateTime?
+  suppressUntil      DateTime? @db.Timestamptz(3)
 }
 
 /// One row per adapter invocation, success or failure. Written in Phase 1.
 model AdapterRun {
   id                Int       @id @default(autoincrement())
   adapterKey        String
-  startedAt         DateTime
-  finishedAt        DateTime?
+  startedAt         DateTime  @db.Timestamptz(3)
+  finishedAt        DateTime? @db.Timestamptz(3)
   /// ok | failed
   status            String
   itemsFetched      Int       @default(0)
@@ -98,7 +92,7 @@ model AdapterRun {
 /// data instead of no data (architecture-spec.md §5).
 model TaxonomySnapshot {
   id        Int      @id @default(autoincrement())
-  fetchedAt DateTime
+  fetchedAt DateTime @db.Timestamptz(3)
   /// Raw GET /api/secondarydesigns/categories response.
   body      Json
 

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma, Signal } from '@prisma/client';
+import { Prisma, type Signal } from '@prisma/client';
 import { PrismaService } from './prisma.service';
 import { BUDGET_CONSUMING_STATUSES, SignalStatus } from './signal-status';
 
@@ -19,8 +19,16 @@ export interface CreatePendingInput {
 export interface TerminalUpdate {
   status: SignalStatus;
   dmStatusCode?: number | undefined;
-  dmResponse?: string | undefined;
+  dmResponse?: Prisma.InputJsonValue | undefined;
   postedAt?: Date | undefined;
+}
+
+/**
+ * Prisma will not accept a bare `null` for a nullable Json column -- it cannot
+ * tell "SQL NULL" from "the JSON value null". DbNull is the explicit former.
+ */
+function jsonOrNull(value: Prisma.InputJsonValue | undefined): Prisma.InputJsonValue | typeof Prisma.DbNull {
+  return value === undefined ? Prisma.DbNull : value;
 }
 
 /** Trailing-window usage, total and broken out per adapter. */
@@ -66,7 +74,7 @@ export class SignalRepository {
       data: {
         status: update.status,
         dmStatusCode: update.dmStatusCode ?? null,
-        dmResponse: update.dmResponse ?? null,
+        dmResponse: jsonOrNull(update.dmResponse),
         postedAt: update.postedAt ?? null,
         nextAttemptAt: null,
       },
@@ -77,7 +85,7 @@ export class SignalRepository {
   scheduleRetry(
     id: string,
     nextAttemptAt: Date,
-    outcome: { dmStatusCode?: number | undefined; dmResponse?: string | undefined },
+    outcome: { dmStatusCode?: number | undefined; dmResponse?: Prisma.InputJsonValue | undefined },
   ): Promise<Signal> {
     return this.prisma.signal.update({
       where: { id },
@@ -85,7 +93,7 @@ export class SignalRepository {
         status: SignalStatus.PENDING,
         nextAttemptAt,
         dmStatusCode: outcome.dmStatusCode ?? null,
-        dmResponse: outcome.dmResponse ?? null,
+        dmResponse: jsonOrNull(outcome.dmResponse),
       },
     });
   }

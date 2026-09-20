@@ -49,12 +49,12 @@ describe('SignalRepository.usageSince', () => {
     const { repo, groupBy } = setup();
     groupBy.mockResolvedValue([
       { adapterKey: 'manual', _count: { _all: 4 } },
-      { adapterKey: 'reddit', _count: { _all: 7 } },
+      { adapterKey: 'search', _count: { _all: 7 } },
     ]);
 
     const usage = await repo.usageSince(new Date());
 
-    expect(usage).toEqual({ total: 11, byAdapter: { manual: 4, reddit: 7 } });
+    expect(usage).toEqual({ total: 11, byAdapter: { manual: 4, search: 7 } });
   });
 });
 

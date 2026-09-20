@@ -154,12 +154,12 @@ describe('SweepService — budget and rate interaction', () => {
 
   it('keeps going past a budget-blocked row, since another adapter may have room', async () => {
     const outcomes = new Map([
-      ['reddit_row', { status: SignalStatus.PENDING, parkedReason: 'budget_exhausted' }],
+      ['search_row', { status: SignalStatus.PENDING, parkedReason: 'budget_exhausted' }],
     ]);
     const { signals, dm, sweep } = setup({ outcomes });
     signals.seed({
-      id: 'reddit_row',
-      adapterKey: 'reddit',
+      id: 'search_row',
+      adapterKey: 'search',
       status: SignalStatus.PENDING,
       createdAt: new Date(NOW.getTime() - 60_000),
     });
@@ -167,7 +167,7 @@ describe('SweepService — budget and rate interaction', () => {
 
     const summary = await sweep.sweep();
 
-    expect(dm.dispatched).toEqual(['reddit_row', 'manual_row']);
+    expect(dm.dispatched).toEqual(['search_row', 'manual_row']);
     expect(summary).toEqual({ examined: 2, posted: 1, parked: 1, failed: 0 });
   });
 

@@ -21,7 +21,7 @@ describe('loadEnv — defaults', () => {
     expect(env.GENERATOR_SOURCE_KEY).toBe('signalgen-v1');
     expect(env.BUDGET_TOTAL_24H).toBe(500);
     expect(env.BUDGET_MANUAL_24H).toBe(50);
-    expect(env.BUDGET_REDDIT_24H).toBe(100);
+    expect(env.BUDGET_SEARCH_24H).toBe(100);
     expect(env.PORT).toBe(3000);
     expect(env.NODE_ENV).toBe('development');
   });
@@ -102,7 +102,39 @@ describe('loadEnv — validation', () => {
   });
 
   it('accepts a budget of zero, which disables an adapter', () => {
-    expect(loadEnv({ ...VALID, BUDGET_REDDIT_24H: '0' } as never).BUDGET_REDDIT_24H).toBe(0);
+    expect(loadEnv({ ...VALID, BUDGET_SEARCH_24H: '0' } as never).BUDGET_SEARCH_24H).toBe(0);
+  });
+});
+
+describe('loadEnv — ADAPTER_SHORTCODES', () => {
+  it('defaults to the convention in architecture-spec.md', () => {
+    expect(loadEnv({ ...VALID } as never).ADAPTER_SHORTCODES).toEqual({
+      manual: 'man',
+      search: 'srch',
+    });
+  });
+
+  it('accepts an override, so a new adapter needs no code change', () => {
+    const env = loadEnv({
+      ...VALID,
+      ADAPTER_SHORTCODES: 'manual:man, search:srch, calendar:cal',
+    } as never);
+    expect(env.ADAPTER_SHORTCODES['calendar']).toBe('cal');
+  });
+
+  it('rejects a malformed pair', () => {
+    expect(() => loadEnv({ ...VALID, ADAPTER_SHORTCODES: 'manual' } as never)).toThrow(
+      /ADAPTER_SHORTCODES/,
+    );
+  });
+
+  it('rejects a shortcode that would make an illegible or oversized prefix', () => {
+    expect(() => loadEnv({ ...VALID, ADAPTER_SHORTCODES: 'manual:MAN' } as never)).toThrow(
+      /ADAPTER_SHORTCODES/,
+    );
+    expect(() =>
+      loadEnv({ ...VALID, ADAPTER_SHORTCODES: 'manual:waytoolongcode' } as never),
+    ).toThrow(/ADAPTER_SHORTCODES/);
   });
 });
 
@@ -111,12 +143,21 @@ describe('ConfigService', () => {
 
   it('exposes the per-adapter budgets', () => {
     expect(service.budgetFor('manual')).toBe(50);
-    expect(service.budgetFor('reddit')).toBe(100);
+    expect(service.budgetFor('search')).toBe(100);
   });
 
   it('fails closed for an adapter with no configured budget', () => {
     // A future adapter must not inherit someone else's quota by accident.
     expect(service.budgetFor('calendar')).toBe(0);
+  });
+
+  it('maps the configured adapter shortcodes', () => {
+    expect(service.shortcodeFor('manual')).toBe('man');
+    expect(service.shortcodeFor('search')).toBe('srch');
+  });
+
+  it('returns undefined for an unregistered adapter, so signal-id derives one', () => {
+    expect(service.shortcodeFor('calendar')).toBeUndefined();
   });
 
   it('reports the dry-run flag and generator identity', () => {

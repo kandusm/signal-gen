@@ -2,11 +2,16 @@ import { z } from 'zod';
 import { dmSignalPayloadSchema } from './payload';
 
 /**
- * Adapter identity. Open union: the two Phase 1/3 adapters are named so they
- * autocomplete, but the pipeline never switches on this exhaustively and a
- * new adapter must not require a contract change.
+ * Adapter identity. Open union: the two adapters the roadmap commits to are
+ * named so they autocomplete, but the pipeline never switches on this
+ * exhaustively and a new adapter must not require a contract change.
+ *
+ * "search" is the Brave Search adapter (Phase 2). Direct Reddit Data API
+ * access is a later adapter pending commercial approval
+ * (architecture-spec.md §15); until then Reddit content is reached through
+ * `site:reddit.com/r/...` search queries and still arrives as "search".
  */
-export type AdapterKey = 'manual' | 'reddit' | (string & {});
+export type AdapterKey = 'manual' | 'search' | (string & {});
 
 /**
  * What an adapter emits. Everything the wire payload carries, minus the two

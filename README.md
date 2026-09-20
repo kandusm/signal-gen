@@ -25,12 +25,39 @@ docs/               architecture spec, build plan, DM contract
 
 ```bash
 pnpm install
-cp .env.example .env          # fill in DM_SIGNAL_KEY, MAILWAIN_*, ALERT_*
+cp apps/service/.env.example apps/service/.env
 docker compose up -d db       # local Postgres 16
 pnpm --filter @signalgen/service migrate:dev
 pnpm test
 pnpm build
 ```
+
+### Configuration
+
+Environment files live in `apps/service/`, not the repo root — Prisma's CLI
+looks for `.env` beside the package and schema and does not search upward, so
+a root-level file would be silently ignored by every migration command.
+
+Two files are loaded, in order, via Node's native `--env-file-if-exists` (no
+dotenv dependency):
+
+| File | Purpose | Read by Prisma CLI? |
+|---|---|---|
+| `.env` | Local development. Points at the compose Postgres. | **Yes** |
+| `.env.local` | Overrides: staged Supabase credentials, real secrets. | **No** |
+
+Later wins, so `.env.local` overrides `.env`. A real process environment
+variable — a Fly secret in production — beats both, so neither file can affect
+a deployment.
+
+That Prisma ignores `.env.local` is load-bearing rather than incidental.
+`prisma migrate dev` creates and drops a shadow database and will offer to
+reset its target, so a remote URL reaching it is the one genuinely destructive
+mistake available here. Supabase credentials therefore live only in
+`.env.local`, and `pnpm migrate:dev` additionally refuses to run against any
+non-local host (`apps/service/scripts/assert-local-db.mjs`). Supabase receives
+schema changes through `prisma migrate deploy` in the Fly release command, and
+nowhere else.
 
 Then the dry-run rehearsal, which is Phase 0's end-to-end proof:
 

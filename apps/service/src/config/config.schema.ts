@@ -92,7 +92,42 @@ export const envSchema = z.object({
   /** DM allows 500/day per key (dm-contract.md → Rate limits). */
   BUDGET_TOTAL_24H: positiveIntFromEnv(500),
   BUDGET_MANUAL_24H: positiveIntFromEnv(50),
-  BUDGET_REDDIT_24H: positiveIntFromEnv(100),
+  BUDGET_SEARCH_24H: positiveIntFromEnv(100),
+
+  // --- signalId shortcodes ----------------------------------------------
+  /**
+   * Adapter shortcode map, as `adapterKey:code` pairs.
+   *
+   * The brief calls for a config-driven map rather than a hardcoded switch.
+   * dm-contract.md recommends a source prefix so a signalId is legible in DM's
+   * review queue without a lookup, and architecture-spec.md fixes the
+   * convention as `man_` and `srch_`.
+   *
+   * Defaults cover the adapters the roadmap names; a new adapter can be given
+   * a code without a code change, and gets a derived one if nobody does.
+   */
+  ADAPTER_SHORTCODES: z
+    .string()
+    .default('manual:man,search:srch')
+    .transform((value, ctx) => {
+      const map: Record<string, string> = {};
+      for (const pair of value.split(',').map((p) => p.trim()).filter(Boolean)) {
+        const [key, code] = pair.split(':').map((part) => part?.trim());
+        if (!key || !code) {
+          ctx.addIssue({ code: 'custom', message: `"${pair}" is not a "adapterKey:code" pair` });
+          continue;
+        }
+        if (!/^[a-z0-9]{1,8}$/.test(code)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `shortcode "${code}" must be 1-8 lowercase alphanumeric characters`,
+          });
+          continue;
+        }
+        map[key] = code;
+      }
+      return map;
+    }),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -36,8 +36,8 @@ export class ConfigService {
     switch (adapterKey) {
       case 'manual':
         return this.env.BUDGET_MANUAL_24H;
-      case 'reddit':
-        return this.env.BUDGET_REDDIT_24H;
+      case 'search':
+        return this.env.BUDGET_SEARCH_24H;
       default:
         return 0;
     }
@@ -45,6 +45,15 @@ export class ConfigService {
 
   /** Adapters that have a configured budget, for /healthz reporting. */
   get budgetedAdapterKeys(): string[] {
-    return ['manual', 'reddit'];
+    return ['manual', 'search'];
+  }
+
+  /**
+   * Shortcode for an adapter's signalId prefix, or undefined if none is
+   * configured. signal-id.ts derives a fallback rather than failing, so an
+   * unregistered adapter still produces a well-formed id.
+   */
+  shortcodeFor(adapterKey: AdapterKey): string | undefined {
+    return this.env.ADAPTER_SHORTCODES[adapterKey];
   }
 }

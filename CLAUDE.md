@@ -6,10 +6,8 @@ with `docs/architecture-spec.md`, a build plan, or a phase brief, **the
 contract wins and you stop and flag the disagreement** rather than picking a
 side.
 
-> Note: the Phase 0 brief cites "build-plan §9" for these guardrails. The build
-> plan has eight sections. What follows is drawn from build-plan.md sections 3,
-> 4 and 7, architecture-spec.md sections 3, 6 and 11, and the brief's own
-> constraints. Worth reconciling at the review gate.
+Sources: build-plan.md §9 (pre-flight), §3 (migrations) and §4 (deploy flow);
+architecture-spec.md §3, §6 and §11.
 
 ## Never
 
@@ -17,11 +15,25 @@ side.
   `db execute` and `migrate reset` run against the docker-compose Postgres and
   nowhere else. Supabase gets `migrate deploy`, from the Fly release command,
   and nothing else. `db push` against Supabase is never correct.
+
+  Two mechanisms enforce this, and neither should be weakened: Supabase
+  credentials live in `apps/service/.env.local`, which Prisma's CLI does not
+  read, and `pnpm migrate:dev` runs `scripts/assert-local-db.mjs` first, which
+  exits non-zero if `DATABASE_URL` or `DIRECT_URL` names a non-local host.
+  If a migration command is being awkward, fix the URL — do not bypass
+  the guard.
 - **Never deploy.** `fly deploy`, `fly launch`, `fly secrets` and the
   supervised first real post are Kandus's, not the agent's.
-- **Never commit a secret.** `.env` is gitignored; `.env.example` carries
-  placeholders only. No key, token or connection string with a real password
-  belongs in the repo, in a test fixture, or in a commit message.
+- **Never edit secrets in `fly.toml`.** Secrets reach the service through
+  `fly secrets` and Vercel env, never a committed file (build-plan.md §9).
+- **Never put a production secret in the dev environment.** build-plan.md §9
+  is explicit: local work runs entirely against the compose Postgres. Staged
+  Supabase credentials live in `apps/service/.env.local`, which Prisma cannot
+  read and the migration guard rejects.
+- **Never commit a secret.** `.env` and `.env.local` are gitignored and
+  excluded from the Docker build context; `.env.example` carries placeholders
+  only. No key, token or connection string with a real password belongs in the
+  repo, in a test fixture, or in a commit message.
 - **Never add a queue library.** BullMQ/Redis were considered and rejected: at
   a 500/day ceiling the DB-backed ledger provides the same durability
   (architecture-spec.md section 3).
@@ -45,6 +57,17 @@ side.
 - **Reuse `@signalgen/contract`.** The wire schema is defined once. Service
   validation, tests and the Phase 4 web form all import it, so drift is a type
   error rather than a production 400.
+- **UTC everywhere it is stored or sent.** All DateTime columns are
+  `Timestamptz(3)`, the container runs `TZ=UTC`, and `toWireTimestamp`
+  (`src/common/time.ts`) is the only way a timestamp is formatted for DM.
+  Anything user-facing renders in `America/Chicago` — nothing does yet
+  (build-plan.md §9).
+- **Migrations are forward-only.** Destructive changes use expand/contract.
+  The one exception was regenerating the initial migration before it had ever
+  been applied; once a migration has run anywhere, it is immutable.
+- **Pinned toolchain.** Node 22.x (`engines`), pnpm (`packageManager`) and
+  Prisma (exact version, CLI and client together) are pinned per
+  build-plan.md §9. Do not loosen them to a caret range.
 - **Conventional commits**, on a phase branch, reviewed before merge.
 
 ## Scope discipline
@@ -56,6 +79,12 @@ scaffolding takes the learning out of both.
 
 Current phase: **0 — foundation**. Adapters, dedup/fingerprint suppression and
 the web app are explicitly out of scope.
+
+Roadmap, as revised: Phase 1 pipeline core + manual adapter; Phase 2 the Brave
+Search adapter (pair); Phase 3 the Vercel web app (Chris-led). The calendar
+adapter is dropped and a direct Reddit adapter is deferred behind a commercial
+access application — until then Reddit content is reached through
+`site:reddit.com/r/...` search queries and arrives under `adapterKey: "search"`.
 
 ## Layout
 
@@ -79,12 +108,18 @@ adapter, the adapter boundary is wrong.
 
 ```bash
 pnpm install
+cp apps/service/.env.example apps/service/.env
 docker compose up -d db                  # local Postgres, required for migrations
 pnpm --filter @signalgen/service migrate:dev
 pnpm test                                # offline; no DM or MailWain contact
 pnpm build
 pnpm seed:candidate                      # dry-run rehearsal, writes one dry_run row
 ```
+
+Env files live in `apps/service/` (Prisma does not search up to the workspace
+root). `.env` is local development and is the only one Prisma reads;
+`.env.local` holds staged Supabase credentials and overrides `.env` for the
+service itself.
 
 ## Testing
 

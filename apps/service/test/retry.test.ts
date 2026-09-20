@@ -112,7 +112,7 @@ function setup(results: ReturnType<typeof httpResponse>[], options: { dryRun?: b
   const notify = new FakeNotifyService();
   const config = new FakeConfigService({
     dryRun: options.dryRun ?? false,
-    budgets: { manual: 50, reddit: 100 },
+    budgets: { manual: 50, search: 100 },
   });
   const rateLimit = new RateLimitService(clock);
   const budget = {
@@ -211,14 +211,14 @@ describe('DmClient — ledger ordering', () => {
     expect((post?.payload as { signalId: string }).signalId).toBe(result.signalId);
   });
 
-  it('prefixes the signalId by adapter', async () => {
+  it('prefixes the signalId with the configured shortcode', async () => {
     const manual = setup([ACCEPTED()]);
     expect((await manual.dm.postSignal(candidate())).signalId).toMatch(/^man_/);
 
-    const reddit = setup([ACCEPTED()]);
+    const search = setup([ACCEPTED()]);
     expect(
-      (await reddit.dm.postSignal(candidate({ adapterKey: 'reddit', platform: 'reddit' }))).signalId,
-    ).toMatch(/^rdt_/);
+      (await search.dm.postSignal(candidate({ adapterKey: 'search', platform: 'Web' }))).signalId,
+    ).toMatch(/^srch_/);
   });
 });
 
@@ -263,7 +263,12 @@ describe('DmClient — terminal transitions', () => {
     const row = h.signals.rows.get(signalId);
     expect(row?.dmStatusCode).toBe(400);
     expect(row?.nextAttemptAt).toBeNull();
-    expect(row?.dmResponse).toContain('VALIDATION_FAILED');
+    // dmResponse is a Json column now: DM's own body is stored whole, so the
+    // failing field is reachable rather than buried in a string.
+    expect(row?.dmResponse).toMatchObject({
+      error: 'VALIDATION_FAILED',
+      details: [{ field: 'tone' }],
+    });
     expect(h.notify.kinds()).toEqual(['permanent_failure']);
     expect(h.http.posts).toHaveLength(1);
   });
@@ -296,7 +301,7 @@ describe('DmClient — retry schedule', () => {
     const row = h.signals.rows.get(signalId);
     expect(row?.status).toBe(SignalStatus.PENDING);
     expect(row?.dmStatusCode).toBeNull();
-    expect(row?.dmResponse).toContain('ECONNREFUSED');
+    expect(row?.dmResponse).toEqual({ error: 'TRANSPORT_ERROR', message: 'ECONNREFUSED' });
     expect(row?.nextAttemptAt).toEqual(new Date(NOW.getTime() + 60_000));
   });
 
@@ -413,7 +418,10 @@ describe('DmClient — guards', () => {
     expect(h.http.posts).toHaveLength(0);
     const row = h.signals.rows.get(signalId);
     expect(row?.status).toBe(SignalStatus.REJECTED_SCHEMA);
-    expect(row?.dmResponse).toContain('keywords');
+    expect(row?.dmResponse).toMatchObject({
+      error: 'VALIDATION_FAILED_LOCAL',
+      details: [{ field: 'keywords' }],
+    });
   });
 
   it('parks the row when the local token bucket is empty', async () => {
@@ -478,7 +486,11 @@ describe('DmClient — tone gate', () => {
     const first = await h.dm.postSignal(candidate({ tone: 'Sarcastic' }));
     expect(first.status).toBe(SignalStatus.REJECTED_TONE);
     expect(h.http.posts).toHaveLength(0);
-    expect(h.signals.rows.get(first.signalId)?.dmResponse).toContain('Sarcastic');
+    expect(h.signals.rows.get(first.signalId)?.dmResponse).toMatchObject({
+      error: 'TONE_REJECTED',
+      tone: 'Sarcastic',
+      knownTones: ['Professional', 'Humor'],
+    });
     expect(h.notify.kinds()).toEqual(['tone_rejection']);
 
     // Same adapter, same day: ledgered again, but no second email.

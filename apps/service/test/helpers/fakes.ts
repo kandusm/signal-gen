@@ -62,7 +62,7 @@ export class FakeSignalRepository {
       ...row,
       status: update.status,
       dmStatusCode: update.dmStatusCode ?? null,
-      dmResponse: update.dmResponse ?? null,
+      dmResponse: (update.dmResponse ?? null) as Signal['dmResponse'],
       postedAt: update.postedAt ?? null,
       nextAttemptAt: null,
     };
@@ -73,7 +73,7 @@ export class FakeSignalRepository {
   async scheduleRetry(
     id: string,
     nextAttemptAt: Date,
-    outcome: { dmStatusCode?: number | undefined; dmResponse?: string | undefined },
+    outcome: { dmStatusCode?: number | undefined; dmResponse?: unknown },
   ): Promise<Signal> {
     const row = this.require(id);
     const next: Signal = {
@@ -81,7 +81,7 @@ export class FakeSignalRepository {
       status: SignalStatus.PENDING,
       nextAttemptAt,
       dmStatusCode: outcome.dmStatusCode ?? null,
-      dmResponse: outcome.dmResponse ?? null,
+      dmResponse: (outcome.dmResponse ?? null) as Signal['dmResponse'],
     };
     this.rows.set(id, next);
     return next;
@@ -201,6 +201,7 @@ export class FakeConfigService {
       generatorSourceKey?: string;
       totalBudget24h?: number;
       budgets?: Record<string, number>;
+      shortcodes?: Record<string, string>;
     } = {},
   ) {}
 
@@ -221,7 +222,11 @@ export class FakeConfigService {
   }
 
   get budgetedAdapterKeys(): string[] {
-    return Object.keys(this.values.budgets ?? { manual: 50, reddit: 100 });
+    return Object.keys(this.values.budgets ?? { manual: 50, search: 100 });
+  }
+
+  shortcodeFor(adapterKey: string): string | undefined {
+    return (this.values.shortcodes ?? { manual: 'man', search: 'srch' })[adapterKey];
   }
 }
 

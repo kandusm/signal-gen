@@ -11,7 +11,7 @@ function setup(options: { total?: number; budgets?: Record<string, number> } = {
   const signals = new FakeSignalRepository(clock);
   const config = new FakeConfigService({
     totalBudget24h: options.total ?? 500,
-    budgets: options.budgets ?? { manual: 50, reddit: 100 },
+    budgets: options.budgets ?? { manual: 50, search: 100 },
   });
   const budget = new BudgetService(config as never, signals as never);
   return { clock, signals, config, budget };
@@ -65,11 +65,11 @@ describe('BudgetService — trailing 24h counting', () => {
   it('breaks usage out per adapter', async () => {
     const { signals, budget } = setup();
     seedPosted(signals, 'manual', 4, 60_000);
-    seedPosted(signals, 'reddit', 7, 60_000);
+    seedPosted(signals, 'search', 7, 60_000);
 
     const usage = await budget.usage(NOW);
     expect(usage.total).toBe(11);
-    expect(usage.byAdapter).toEqual({ manual: 4, reddit: 7 });
+    expect(usage.byAdapter).toEqual({ manual: 4, search: 7 });
   });
 
   it('excludes a row posted at exactly now-24h, and includes one a millisecond later', async () => {
@@ -118,8 +118,8 @@ describe('BudgetService — caps', () => {
   });
 
   it('blocks on the total cap even when the adapter has room', async () => {
-    const { signals, budget } = setup({ total: 12, budgets: { manual: 50, reddit: 100 } });
-    seedPosted(signals, 'reddit', 12, 60_000);
+    const { signals, budget } = setup({ total: 12, budgets: { manual: 50, search: 100 } });
+    seedPosted(signals, 'search', 12, 60_000);
 
     const decision = await budget.check('manual', NOW);
     expect(decision.allowed).toBe(false);
@@ -130,7 +130,7 @@ describe('BudgetService — caps', () => {
   });
 
   it('blocks on the per-adapter cap even when the total has room', async () => {
-    const { signals, budget } = setup({ total: 500, budgets: { manual: 5, reddit: 100 } });
+    const { signals, budget } = setup({ total: 500, budgets: { manual: 5, search: 100 } });
     seedPosted(signals, 'manual', 5, 60_000);
 
     const decision = await budget.check('manual', NOW);
@@ -141,10 +141,10 @@ describe('BudgetService — caps', () => {
   });
 
   it('does not let one noisy adapter starve another', async () => {
-    const { signals, budget } = setup({ total: 500, budgets: { manual: 50, reddit: 100 } });
-    seedPosted(signals, 'reddit', 100, 60_000);
+    const { signals, budget } = setup({ total: 500, budgets: { manual: 50, search: 100 } });
+    seedPosted(signals, 'search', 100, 60_000);
 
-    expect((await budget.check('reddit', NOW)).allowed).toBe(false);
+    expect((await budget.check('search', NOW)).allowed).toBe(false);
     expect((await budget.check('manual', NOW)).allowed).toBe(true);
   });
 
