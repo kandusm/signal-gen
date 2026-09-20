@@ -50,6 +50,11 @@ Later wins, so `.env.local` overrides `.env`. A real process environment
 variable — a Fly secret in production — beats both, so neither file can affect
 a deployment.
 
+Real production secrets may be staged in `.env.local` before production, per
+build-plan.md §9. `DRY_RUN=true` is mandatory while they are there, except
+during a supervised post; at cutover they are removed and `DM_SIGNAL_KEY` and
+the MailWain key are rotated. See [`CLAUDE.md`](CLAUDE.md) for the full policy.
+
 That Prisma ignores `.env.local` is load-bearing rather than incidental.
 `prisma migrate dev` creates and drops a shadow database and will offer to
 reset its target, so a remote URL reaching it is the one genuinely destructive

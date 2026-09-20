@@ -14,26 +14,20 @@ architecture-spec.md §3, §6 and §11.
 - **Never point Prisma at a non-local database.** `migrate dev`, `db push`,
   `db execute` and `migrate reset` run against the docker-compose Postgres and
   nowhere else. Supabase gets `migrate deploy`, from the Fly release command,
-  and nothing else. `db push` against Supabase is never correct.
-
-  Two mechanisms enforce this, and neither should be weakened: Supabase
-  credentials live in `apps/service/.env.local`, which Prisma's CLI does not
-  read, and `pnpm migrate:dev` runs `scripts/assert-local-db.mjs` first, which
-  exits non-zero if `DATABASE_URL` or `DIRECT_URL` names a non-local host.
-  If a migration command is being awkward, fix the URL — do not bypass
-  the guard.
+  and nothing else. `db push` against Supabase is never correct. Two of the
+  three mechanisms under *Secrets policy* exist to enforce exactly this.
 - **Never deploy.** `fly deploy`, `fly launch`, `fly secrets` and the
   supervised first real post are Kandus's, not the agent's.
 - **Never edit secrets in `fly.toml`.** Secrets reach the service through
   `fly secrets` and Vercel env, never a committed file (build-plan.md §9).
-- **Never put a production secret in the dev environment.** build-plan.md §9
-  is explicit: local work runs entirely against the compose Postgres. Staged
-  Supabase credentials live in `apps/service/.env.local`, which Prisma cannot
-  read and the migration guard rejects.
+- **Never weaken the three secret guardrails.** They are what make staged
+  production secrets acceptable at all — see *Secrets policy* below. Removing
+  any one of them is not a refactor.
 - **Never commit a secret.** `.env` and `.env.local` are gitignored and
   excluded from the Docker build context; `.env.example` carries placeholders
   only. No key, token or connection string with a real password belongs in the
-  repo, in a test fixture, or in a commit message.
+  repo, in a test fixture, or in a commit message. Staging a real value in
+  `.env.local` is permitted (below); committing one never is.
 - **Never add a queue library.** BullMQ/Redis were considered and rejected: at
   a 500/day ceiling the DB-backed ledger provides the same durability
   (architecture-spec.md section 3).
@@ -69,6 +63,36 @@ architecture-spec.md §3, §6 and §11.
   Prisma (exact version, CLI and client together) are pinned per
   build-plan.md §9. Do not loosen them to a caret range.
 - **Conventional commits**, on a phase branch, reviewed before merge.
+
+## Secrets policy
+
+build-plan.md §9 permits **real production secrets to be staged in
+`apps/service/.env.local` pre-production**, for integration testing against
+live Supabase and DM. That permission is conditional on three mechanisms, and
+they are load-bearing rather than decorative:
+
+1. **The env split.** `.env` is local development and is the only file
+   Prisma's CLI reads. `.env.local` overrides it for the service and is
+   invisible to Prisma — so a Supabase URL staged there cannot reach
+   `prisma migrate dev`, which creates and drops a shadow database and offers
+   to reset its target.
+2. **`scripts/assert-local-db.mjs`.** Runs before `migrate:dev` and
+   `migrate:reset` with only `.env` loaded, and exits non-zero if
+   `DATABASE_URL` or `DIRECT_URL` names a non-local host.
+3. **`.dockerignore`.** Patterns are `**`-prefixed because `.dockerignore`
+   matches only at the context root; a bare `.env` would not exclude
+   `apps/service/.env.local` from a `COPY . .`. The prune stage deletes any
+   that slip through anyway.
+
+**`DRY_RUN=true` is mandatory** in any environment holding staged secrets. The
+sole exception is a supervised first post: budget capped at 1, a human
+watching the ledger, both restored afterwards.
+
+**At production cutover:** remove the staged secrets from the dev environment,
+rotate `DM_SIGNAL_KEY` and the MailWain key, and keep production secrets only
+in `fly secrets` and Vercel env from then on.
+
+If a migration command is being awkward, fix the URL — do not bypass a guard.
 
 ## Scope discipline
 
