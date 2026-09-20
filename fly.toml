@@ -1,0 +1,54 @@
+# Fly configuration for the signalgen service.
+#
+# Single machine, on purpose. The scheduler is in-process (@nestjs/schedule,
+# architecture-spec.md section 3) and the per-minute token bucket is in-memory,
+# so a second machine would double-fire the sweep cron and would let the two
+# processes each believe they hold the full 10/min allowance. Keep the count at
+# one until the advisory-lock work in Phase 1 lands.
+#
+# Note: architecture-spec.md section 3 chose a self-hosted Docker host and
+# explicitly rejected Fly. build-plan.md section 1 ("Platform summary (final)")
+# supersedes it with Fly, and the Phase 0 brief asks for this file. Flagged for
+# the review gate rather than silently resolved.
+
+app = "signalgen"
+primary_region = "yyz" # Kandus: change to the region you actually want.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+
+[deploy]
+  # Migrations run here and nowhere else: once per deploy, before the new
+  # machine takes traffic. The image itself never migrates.
+  release_command = "npx prisma migrate deploy"
+  # A rolling strategy needs somewhere to roll to. With one machine, that is
+  # a brief outage either way, and `immediate` does not pretend otherwise.
+  strategy = "immediate"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # The service is outbound-only. /healthz is the only reason it listens at
+  # all, and a stopped machine runs no crons -- so it must never stop.
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "30s"
+    timeout = "5s"
+    # Long enough for Nest to boot, connect Prisma and attempt the first
+    # taxonomy fetch before the first check counts against us.
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
