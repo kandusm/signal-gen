@@ -1,0 +1,106 @@
+// Data model per docs/architecture-spec.md §7.
+//
+// Two documented deviations, both required by the Phase 0 brief:
+//
+//   Signal.adapterKey    §7 carries only `sourceKey`, but the brief redefines
+//                        sourceKey as the *generator* identity
+//                        (GENERATOR_SOURCE_KEY, one value per deployment) to
+//                        match dm-contract.md. Per-adapter 24h budgets are
+//                        therefore uncountable without a separate adapter
+//                        column.
+//   Signal.nextAttemptAt Explicitly added by the brief; the sweep uses it to
+//                        own the retry schedule.
+//
+// One documented omission: §7's `DailyBudget` model is absent. The brief
+// resolves OQ-3 by counting a trailing 24h window off the Signal ledger, which
+// makes a calendar-day counter table both redundant and wrong-keyed. See
+// BudgetService for why trailing-24h is safe under either reading of OQ-3.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/// The ledger. Every candidate that reaches the DM client lands here before
+/// any network call, and never leaves. Also the telemetry hook for a future
+/// DM outcome endpoint (architecture-spec.md §7, §15).
+model Signal {
+  /// signalId as sent to DM: "{shortcode}_{ULID}".
+  id            String    @id
+  /// sha256(adapterKey|topic|subtopic) per architecture-spec.md §8.
+  /// Recorded in Phase 0; dedup/suppression that reads it is Phase 1.
+  fingerprint   String
+  /// Which adapter produced the candidate. Drives per-adapter budgets.
+  adapterKey    String
+  /// The generator instance identity sent to DM (GENERATOR_SOURCE_KEY).
+  sourceKey     String
+  topic         String
+  subtopic      String?
+  tone          String
+  platform      String
+  /// The exact body as validated and posted.
+  payload       Json
+  /// pending | posted | suppressed | dry_run | failed | failed_permanent
+  /// | rejected_schema | rejected_tone
+  status        String
+  attempts      Int       @default(0)
+  dmStatusCode  Int?
+  /// Parsed DM response body, or the transport error text when there was no
+  /// response at all.
+  dmResponse    String?
+  /// When the sweep may next touch this row. Null means "eligible now".
+  nextAttemptAt DateTime?
+  createdAt     DateTime  @default(now())
+  postedAt      DateTime?
+
+  @@index([fingerprint])
+  @@index([sourceKey, createdAt])
+  // Trailing-24h budget counting, total and per adapter.
+  @@index([status, postedAt])
+  @@index([adapterKey, status, postedAt])
+  // Sweep drain: pending/retry-due rows, oldest first.
+  @@index([status, nextAttemptAt, createdAt])
+}
+
+/// Dedup state. Written by the Phase 1 pipeline; present in Phase 0 so the
+/// initial migration matches §7 and Phase 1 adds no table.
+model Fingerprint {
+  /// sha256 of the normalized (adapterKey|topic|subtopic) tuple.
+  hash               String    @id
+  sourceKey          String
+  firstSeenAt        DateTime
+  lastSeenAt         DateTime
+  lastPostedSignalId String?
+  suppressUntil      DateTime?
+}
+
+/// One row per adapter invocation, success or failure. Written in Phase 1.
+model AdapterRun {
+  id                Int       @id @default(autoincrement())
+  adapterKey        String
+  startedAt         DateTime
+  finishedAt        DateTime?
+  /// ok | failed
+  status            String
+  itemsFetched      Int       @default(0)
+  candidatesEmitted Int       @default(0)
+  error             String?
+
+  @@index([adapterKey, startedAt])
+}
+
+/// Persisted copy of DM's taxonomy, so a DM outage at boot degrades to stale
+/// data instead of no data (architecture-spec.md §5).
+model TaxonomySnapshot {
+  id        Int      @id @default(autoincrement())
+  fetchedAt DateTime
+  /// Raw GET /api/secondarydesigns/categories response.
+  body      Json
+
+  @@index([fetchedAt])
+}
