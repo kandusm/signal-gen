@@ -12,6 +12,8 @@
     "prisma:generate": "prisma generate",
     "migrate:dev": "node --env-file-if-exists=.env scripts/assert-local-db.mjs && prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
+    "migrate:deploy:remote": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/remote-prisma.mjs migrate deploy",
+    "migrate:status:remote": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/remote-prisma.mjs migrate status",
     "seed:candidate": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --require ts-node/register scripts/seed-candidate.ts",
     "migrate:reset": "node --env-file-if-exists=.env scripts/assert-local-db.mjs && prisma migrate reset"
   },
