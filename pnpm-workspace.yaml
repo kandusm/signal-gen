@@ -1,0 +1,14 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# pnpm >=10 blocks dependency lifecycle scripts unless allowlisted (pnpm 12
+# spells this `allowBuilds`). These genuinely need theirs: Prisma fetches and
+# generates its query engine, esbuild fetches its platform binary. Keeping the
+# allowlist in the repo is what makes `pnpm install` on a clean checkout
+# non-interactive.
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  esbuild: true
+  prisma: true

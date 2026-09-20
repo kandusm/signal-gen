@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Secrets — only .env.example is committed
+.env
+.env.*
+!.env.example
+
+# Prisma generated client
+apps/service/src/generated/
+apps/service/prisma/*.db
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
