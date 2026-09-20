@@ -147,7 +147,7 @@ P0 → P1 sequential (P1 depends on client + ledger). P2 (Reddit) starts once P1
 **Claude Code harness:**
 - [ ] `CLAUDE.md` at repo root: conventions, commands, and hard guardrails — never run migrations against Supabase, never deploy, never touch `fly.toml` secrets sections, local Docker Postgres only.
 - [ ] `docs/architecture-spec.md` + `docs/build-plan.md` + `docs/dm-contract.md` committed before session 1; directives reference them.
-- [ ] `.env.example` complete; **no production secrets in the dev environment ever** — CC works entirely against local Postgres, prod secrets exist only in `fly secrets` / Vercel env.
+- [ ] `.env.example` complete. **Secrets policy (pre-production):** prod secrets MAY be staged in `apps/service/.env.local` for integration testing — gitignored, excluded from the Docker context, invisible to Prisma CLI (env split), and blocked from `migrate dev` by `assert-local-db.mjs`. `DRY_RUN=true` stays on in any environment holding them except supervised posts. **At production cutover:** remove staged secrets from dev, rotate `DM_SIGNAL_KEY` + MailWain key, and prod secrets live only in `fly secrets` / Vercel env thereafter.
 - [ ] Pin Node 22.x, pnpm version (packageManager field), Prisma version.
 
 **Time discipline:**
