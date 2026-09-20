@@ -37,7 +37,11 @@ RUN pnpm --filter @signalgen/contract build \
 FROM build AS prune
 # Re-resolving with --prod removes the dev tree in place. The Prisma client
 # lives inside node_modules, so it has to be generated again afterwards.
-RUN pnpm install --frozen-lockfile --prod \
+# --ignore-scripts: with devDependencies gone, the contract package's
+# `prepare` (tsc) would have no compiler to run. Its dist is already built in
+# the stage above, and the Prisma client is regenerated explicitly below, so
+# nothing here needs a lifecycle script.
+RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
     && pnpm --filter @signalgen/service exec prisma generate \
     && rm -rf /app/apps/service/test /app/apps/service/src /app/packages/contract/test \
               /app/packages/contract/src /app/docs
