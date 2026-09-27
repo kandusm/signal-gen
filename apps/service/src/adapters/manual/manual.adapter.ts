@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import type { CandidateSignal } from '@signalgen/contract';
+import type { CandidateSignal, ManualSubmission } from '@signalgen/contract';
+import { toWireTimestamp } from '../../common';
 import { RegisterAdapter, type SourceAdapter } from '../source-adapter';
 
 /**
@@ -17,6 +18,28 @@ export class ManualAdapter implements SourceAdapter {
 
   async fetch(): Promise<CandidateSignal[]> {
     return [];
+  }
+
+  /**
+   * An operator submission as a CandidateSignal. `taxonomyAligned` is decided
+   * by the caller against DM's live taxonomy (spec §5: manual entry selects
+   * from it, so a mismatch is worth flagging rather than guessing).
+   */
+  toCandidate(submission: ManualSubmission, capturedAt: Date, taxonomyAligned: boolean): CandidateSignal {
+    return {
+      adapterKey: this.key,
+      capturedAt: toWireTimestamp(capturedAt),
+      topic: submission.topic,
+      subtopic: submission.subtopic,
+      tone: submission.tone,
+      platform: submission.platform,
+      keywords: submission.keywords,
+      audience: submission.audience,
+      sourceUrl: submission.sourceUrl,
+      sourceExcerpt: submission.sourceExcerpt,
+      signalDecayHint: submission.signalDecayHint,
+      taxonomyAligned,
+    };
   }
 
   /** `lowercase(trim(topic)) | lowercase(trim(subtopic ?? ""))` — spec §8. */
