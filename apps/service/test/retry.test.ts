@@ -14,6 +14,7 @@ import {
   nextRetryDelayMs,
   parseRetryAfterSeconds,
 } from '../src/dm';
+import { renderAlert } from '../src/notify';
 import { SignalStatus } from '../src/persistence';
 import {
   FakeConfigService,
@@ -238,14 +239,33 @@ describe('DmClient — terminal transitions', () => {
       details: [{ field: 'tone' }],
     });
     expect(h.notify.kinds()).toEqual(['permanent_failure']);
+    expect(h.notify.sent[0]).toMatchObject({
+      kind: 'permanent_failure',
+      signalId,
+      status: SignalStatus.FAILED_PERMANENT,
+      adapterKey: 'manual',
+      dmStatusCode: 400,
+    });
     expect(h.http.posts).toHaveLength(1);
   });
 
-  it('401 is permanent too', async () => {
-    const h = setup([httpResponse(401, null)]);
-    const { status } = await submit(h, candidate());
+  it('401 is permanent too, and the alert email names the signal and its status', async () => {
+    // The forced-failure drill (stop condition 4) is exactly this: an
+    // invalidated DM_SIGNAL_KEY answering 401.
+    const h = setup([httpResponse(401, { message: 'Missing or invalid bearer token' })]);
+    const { signalId, status } = await submit(h, candidate());
+
     expect(status).toBe(SignalStatus.FAILED_PERMANENT);
-    expect(h.notify.kinds()).toEqual(['permanent_failure']);
+    expect(h.signals.rows.get(signalId)?.status).toBe(SignalStatus.FAILED_PERMANENT);
+    expect(h.notify.sent).toEqual([
+      expect.objectContaining({ kind: 'permanent_failure', signalId, status: SignalStatus.FAILED_PERMANENT, dmStatusCode: 401 }),
+    ]);
+
+    const email = renderAlert(h.notify.sent[0] as never);
+    expect(`${email.subject}
+${email.text}`).toContain(signalId);
+    expect(`${email.subject}
+${email.text}`).toContain(SignalStatus.FAILED_PERMANENT);
   });
 });
 
