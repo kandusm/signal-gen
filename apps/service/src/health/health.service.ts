@@ -72,6 +72,9 @@ export class HealthService {
     if (!state) issues.push('no taxonomy available');
     else if (state.fromSnapshot) issues.push('taxonomy served from persisted snapshot');
     else if (stale) issues.push('taxonomy older than its TTL');
+    // Independent of freshness: a taxonomy can be current and still carry no
+    // tones, and then the tone gate is being skipped on every signal.
+    if (state && !state.taxonomy.tones) issues.push('taxonomy has no tones; tone gate skipped');
 
     let budget: HealthReport['budget'] = null;
     if (databaseReachable) {
@@ -111,7 +114,7 @@ export class HealthService {
         stale,
         fromSnapshot: state?.fromSnapshot ?? false,
         categories: state?.taxonomy.categories.length ?? 0,
-        tones: state?.taxonomy.tones.length ?? 0,
+        tones: state?.taxonomy.tones?.length ?? 0,
       },
       budget,
       rateLimit: {

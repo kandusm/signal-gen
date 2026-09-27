@@ -72,7 +72,7 @@ Key is issued via DM configuration (`Api:SignalKey`). One key per signal generat
 | capturedAt | ISO 8601 datetime | When the signal generator captured this observation |
 | sourceKey | string, ≤32 chars | Identifies the signal generator instance/version (e.g., `trend-monitor-v1`). One value per deployed generator |
 | topic | string, ≤128 chars | Primary subject. Should map to a Category in DM's taxonomy where possible |
-| tone | string | Must match a valid Tone in DM's taxonomy — fetch current list via GET /api/secondarydesigns/categories |
+| tone | string | Should match a Tone in DM's taxonomy (GET /api/secondarydesigns/categories). DM does not validate it — see *Taxonomy sync → Tone* |
 | platform | string | Where the signal was observed (LinkedIn, Reddit, TikTok, Twitter/X, Etsy, GoogleTrends, etc.) |
 
 ### Recommended
@@ -133,7 +133,11 @@ Returned when a signalId already exists. The request is a no-op; no state change
 }
 ```
 
-Returned on schema violations or unknown taxonomy values that block Tier 1 matching.
+Returned on schema violations.
+
+> **Amended 2026-09-27.** The tone example above was aspirational: DM has never
+> validated tone, and an unknown taxonomy value does not produce a 400. It stays
+> as an illustration of the error body's shape only.
 
 ### 401 Unauthorized
 
@@ -175,13 +179,36 @@ Returns current valid values:
 {
   "categories": [
     {
+      "id": "1ca227ed-…",
       "name": "Trades",
-      "subcategories": ["Welding", "Plumbing", "Electrical", "Carpentry"]
+      "subcategories": [
+        { "id": "557331f9-…", "name": "Welding" },
+        { "id": "8f0c1d2e-…", "name": "Plumbing" }
+      ]
     }
   ],
   "tones": ["Professional", "Humor", "Inspirational", "Vintage", "Bold"]
 }
 ```
+
+> **Amended 2026-09-27** to the shape DM actually serves: categories and
+> subcategories carry ids, and subcategories are `{ id, name }` objects rather
+> than strings. Matching is by `name`; ids are informational.
+
+### Tone
+
+`tones` is **optional** in the response. DM does not currently publish it; it
+will, from DM configuration. Until then the response carries categories only.
+
+DM does not validate tone on `POST /api/signals`. The generator's tone gate
+exists for **match-quality discipline** — an unrecognised tone silently loses
+Tier 1 matching — not to avoid a 400. It therefore:
+
+- rejects a tone (`rejected_tone`) only when DM has published a tone list and
+  the tone is not on it;
+- skips, and does not reject, when there is no taxonomy at all or the taxonomy
+  carries no tones. `/healthz` reports the skip as a `degraded` issue so it is
+  never silent.
 
 Signal generator should fetch this on startup and refresh periodically (recommended: every 6h). Sending unknown Category/Subcategory/Tone values doesn't reject the signal — Tier 2 keyword matching and Tier 3 AI ranking still work — but Tier 1 taxonomy matching won't fire, reducing match quality.
 

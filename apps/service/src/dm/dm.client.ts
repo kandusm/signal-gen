@@ -140,11 +140,12 @@ export class DmClient {
       });
       return { signalId, status: SignalStatus.REJECTED_TONE };
     }
-    if (toneValid === 'unknown') {
-      // No taxonomy at all. dm-contract.md says an unrecognised tone still
-      // matches via Tier 2/3, so this degrades match quality rather than
-      // blocking the signal.
-      this.logger.warn(`Tone gate skipped for ${signalId}: no taxonomy available`);
+    if (toneValid === 'no_taxonomy' || toneValid === 'no_tones') {
+      // Nothing to check against. DM does not validate tone and an
+      // unrecognised one still matches via Tier 2/3 (dm-contract.md), so this
+      // degrades match quality rather than blocking the signal.
+      const reason = toneValid === 'no_taxonomy' ? 'no taxonomy available' : 'DM publishes no tones';
+      this.logger.warn(`Tone gate skipped for ${signalId}: ${reason}`);
     }
 
     // (5) Dry run. Checked before the rate guards on purpose: a rehearsal makes

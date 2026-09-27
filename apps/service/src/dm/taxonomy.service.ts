@@ -14,6 +14,9 @@ export interface TaxonomyState {
   fromSnapshot: boolean;
 }
 
+/** Tone gate outcome: valid, invalid, or a reason the check could not run. */
+export type ToneCheck = boolean | 'no_taxonomy' | 'no_tones';
+
 /**
  * DM's taxonomy, cached in memory with a persisted fallback.
  *
@@ -98,7 +101,8 @@ export class TaxonomyService implements OnModuleInit {
     }
 
     this.logger.log(
-      `Taxonomy refreshed: ${parsed.data.categories.length} categories, ${parsed.data.tones.length} tones`,
+      `Taxonomy refreshed: ${parsed.data.categories.length} categories, ` +
+        (parsed.data.tones ? `${parsed.data.tones.length} tones` : 'no tones published'),
     );
     return this.state;
   }
@@ -106,18 +110,21 @@ export class TaxonomyService implements OnModuleInit {
   /**
    * Whether a tone is in DM's taxonomy.
    *
-   * Returns `unknown` when we have no taxonomy at all. That case must not be
-   * treated as invalid: dm-contract.md says an unrecognised tone still matches
-   * via Tier 2 and Tier 3, so rejecting every signal because DM was down at
-   * boot would trade a small quality loss for a total outage.
+   * Two outcomes mean "cannot tell", and neither is treated as invalid:
+   *   - `no_taxonomy`: DM unreachable at boot and no snapshot to fall back on
+   *   - `no_tones`:    taxonomy loaded, but DM publishes no tones (yet)
+   * DM does not validate tone itself; the gate exists for match quality
+   * (dm-contract.md, Taxonomy sync). Rejecting every signal because we lack
+   * the list would trade a small quality loss for a total outage.
    *
    * Comparison is exact. Adapters are expected to emit taxonomy values
    * verbatim, and catching a casing drift here — before DM does — is the
    * entire point of the gate.
    */
-  async isValidTone(tone: string): Promise<boolean | 'unknown'> {
+  async isValidTone(tone: string): Promise<ToneCheck> {
     const state = await this.get();
-    if (!state) return 'unknown';
+    if (!state) return 'no_taxonomy';
+    if (!state.taxonomy.tones) return 'no_tones';
     return state.taxonomy.tones.includes(tone);
   }
 
@@ -129,7 +136,7 @@ export class TaxonomyService implements OnModuleInit {
     const category = state.taxonomy.categories.find((c) => c.name === topic);
     if (!category) return false;
     if (subtopic === undefined) return true;
-    return category.subcategories.includes(subtopic);
+    return category.subcategories.some((s) => s.name === subtopic);
   }
 
   /** Cached state without triggering a fetch — for /healthz. */

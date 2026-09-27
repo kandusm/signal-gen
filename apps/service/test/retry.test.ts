@@ -446,18 +446,22 @@ describe('DmClient — guards', () => {
 });
 
 describe('DmClient — tone gate', () => {
-  function toneHarness(tones: string[] | null) {
+  /** `null` = no taxonomy; `'absent'` = taxonomy loaded without tones. */
+  function toneHarness(tones: string[] | null | 'absent') {
     const clock = fixedClock(NOW);
     const signals = new FakeSignalRepository(clock);
     const http = new FakeDmHttpClient([ACCEPTED(), ACCEPTED()]);
     const notify = new FakeNotifyService();
     const taxonomy = {
       async isValidTone(tone: string) {
-        if (tones === null) return 'unknown' as const;
+        if (tones === null) return 'no_taxonomy' as const;
+        if (tones === 'absent') return 'no_tones' as const;
         return tones.includes(tone);
       },
       peek() {
-        return tones === null ? null : { taxonomy: { categories: [], tones }, fetchedAt: NOW, fromSnapshot: false };
+        if (tones === null) return null;
+        const taxonomy = tones === 'absent' ? { categories: [] } : { categories: [], tones };
+        return { taxonomy, fetchedAt: NOW, fromSnapshot: false };
       },
     };
     const dm = new DmClient(
@@ -511,6 +515,16 @@ describe('DmClient — tone gate', () => {
     // dm-contract.md: an unrecognised tone still matches via Tier 2/3, so a DM
     // outage must not turn into a total rejection.
     const h = toneHarness(null);
+    expect((await h.dm.postSignal(candidate({ tone: 'Anything' }))).status).toBe(
+      SignalStatus.POSTED,
+    );
+    expect(h.notify.sent).toHaveLength(0);
+  });
+
+  it('does not reject when the taxonomy carries no tones', async () => {
+    // DM serves categories before it publishes tones. The gate skips; it
+    // does not treat an absent list as "no tone is valid".
+    const h = toneHarness('absent');
     expect((await h.dm.postSignal(candidate({ tone: 'Anything' }))).status).toBe(
       SignalStatus.POSTED,
     );

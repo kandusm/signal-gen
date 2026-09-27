@@ -5,13 +5,20 @@ import { FakeDmHttpClient, FakeTaxonomySnapshotRepository, httpResponse, transpo
 
 const NOW = new Date('2026-09-20T12:00:00.000Z');
 
-/** The taxonomy body documented in dm-contract.md. */
+/** The taxonomy body documented in dm-contract.md, in DM's live shape. */
 const TAXONOMY = {
   categories: [
-    { name: 'Trades', subcategories: ['Welding', 'Plumbing', 'Electrical', 'Carpentry'] },
+    {
+      id: 'c-trades',
+      name: 'Trades',
+      subcategories: ['Welding', 'Plumbing', 'Electrical', 'Carpentry'].map((name) => ({ id: `s-${name}`, name })),
+    },
   ],
   tones: ['Professional', 'Humor', 'Inspirational', 'Vintage', 'Bold'],
 };
+
+/** What DM serves until it publishes tones from config. */
+const { tones: _omitted, ...TAXONOMY_WITHOUT_TONES } = TAXONOMY;
 
 function setup() {
   const clock = fixedClock(NOW);
@@ -74,7 +81,9 @@ describe('TaxonomyService — fetching and caching', () => {
 
   it('does not replace good taxonomy with an unparseable response', async () => {
     const { clock, http, taxonomy } = setup();
-    http.queueTaxonomy(httpResponse(200, TAXONOMY), httpResponse(200, { categories: [] }));
+    // Pre-amendment string subcategories: a shape the schema no longer accepts.
+    const unparseable = { categories: [{ name: 'Trades', subcategories: ['Welding'] }] };
+    http.queueTaxonomy(httpResponse(200, TAXONOMY), httpResponse(200, unparseable));
 
     await taxonomy.get();
     clock.advance(TAXONOMY_TTL_MS);
@@ -159,10 +168,17 @@ describe('TaxonomyService — isValidTone', () => {
     expect(await taxonomy.isValidTone('professional')).toBe(false);
   });
 
-  it('reports unknown rather than invalid when there is no taxonomy', async () => {
+  it('reports no_taxonomy rather than invalid when there is no taxonomy', async () => {
     const { http, taxonomy } = setup();
     http.queueTaxonomy(transportError('ECONNREFUSED'));
-    expect(await taxonomy.isValidTone('Professional')).toBe('unknown');
+    expect(await taxonomy.isValidTone('Professional')).toBe('no_taxonomy');
+  });
+
+  it('reports no_tones rather than invalid when DM publishes no tones', async () => {
+    const { http, taxonomy } = setup();
+    http.queueTaxonomy(httpResponse(200, TAXONOMY_WITHOUT_TONES));
+    expect(await taxonomy.get()).not.toBeNull();
+    expect(await taxonomy.isValidTone('Professional')).toBe('no_tones');
   });
 });
 

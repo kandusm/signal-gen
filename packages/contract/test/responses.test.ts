@@ -62,16 +62,44 @@ describe('dmResponseSchemas', () => {
 });
 
 describe('taxonomyResponseSchema', () => {
-  it('parses the documented taxonomy body', () => {
+  // The shape DM serves live (2026-09-27): ids on categories and
+  // subcategories, subcategories as objects, and no tones yet.
+  const LIVE = {
+    categories: [
+      {
+        id: 'c-trades',
+        name: 'Trades',
+        subcategories: [
+          { id: 's-welding', name: 'Welding' },
+          { id: 's-plumbing', name: 'Plumbing' },
+        ],
+      },
+      { id: 'c-babies', name: 'Babies', subcategories: [] },
+    ],
+  };
+
+  it('parses the live DM body, which has no tones yet', () => {
+    const parsed = taxonomyResponseSchema.parse(LIVE);
+    expect(parsed.categories.map((c) => c.name)).toEqual(['Trades', 'Babies']);
+    expect(parsed.categories[0]?.subcategories.map((s) => s.name)).toEqual(['Welding', 'Plumbing']);
+    expect(parsed.tones).toBeUndefined();
+  });
+
+  it('parses tones once DM publishes them', () => {
     const parsed = taxonomyResponseSchema.parse({
-      categories: [{ name: 'Trades', subcategories: ['Welding', 'Plumbing', 'Electrical', 'Carpentry'] }],
+      ...LIVE,
       tones: ['Professional', 'Humor', 'Inspirational', 'Vintage', 'Bold'],
     });
-    expect(parsed.categories[0]?.name).toBe('Trades');
     expect(parsed.tones).toHaveLength(5);
   });
 
-  it('rejects a body missing tones', () => {
-    expect(taxonomyResponseSchema.safeParse({ categories: [] }).success).toBe(false);
+  it('rejects the old string-subcategory shape', () => {
+    expect(
+      taxonomyResponseSchema.safeParse({ categories: [{ name: 'Trades', subcategories: ['Welding'] }] }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a body missing categories', () => {
+    expect(taxonomyResponseSchema.safeParse({ tones: [] }).success).toBe(false);
   });
 });
