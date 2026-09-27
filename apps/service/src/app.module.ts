@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
+import { AdaptersModule } from './adapters';
 import { ConfigModule } from './config';
 import { DmModule } from './dm';
 import { HealthModule } from './health';
@@ -15,6 +16,7 @@ import { PersistenceModule } from './persistence';
     PersistenceModule,
     NotifyModule,
     DmModule,
+    AdaptersModule,
     HealthModule,
   ],
 })
