@@ -1,6 +1,11 @@
 /**
- * Phase 0 stop condition 2: build one valid CandidateSignal by hand, run it
- * through the real pipeline in DRY_RUN, and assert the ledger row it produced.
+ * Dry-run rehearsal: build one valid CandidateSignal by hand, run it through
+ * the real pipeline in DRY_RUN as a manual submission, and assert the ledger
+ * row it produced.
+ *
+ * With dedup live (Phase 1), the first run within the manual suppression
+ * window ends `dry_run` and every repeat ends `suppressed` — both are a pass,
+ * and the output says which.
  *
  * Deliberately uses the actual Nest application context rather than wiring the
  * services up by hand. A rehearsal that constructs its own object graph proves
@@ -14,8 +19,8 @@ import { NestFactory } from '@nestjs/core';
 import type { CandidateSignal } from '@signalgen/contract';
 import { AppModule } from '../src/app.module';
 import { ConfigService } from '../src/config';
-import { DmClient } from '../src/dm';
 import { SignalRepository, SignalStatus } from '../src/persistence';
+import { AdapterRunRecorder, PipelineService } from '../src/pipeline';
 
 /**
  * A hand-built candidate modelled on the sample body in docs/dm-contract.md.
@@ -66,21 +71,27 @@ async function main(): Promise<void> {
       );
     }
 
-    const dm = app.get(DmClient);
+    const pipeline = app.get(PipelineService);
+    const runs = app.get(AdapterRunRecorder);
     const signals = app.get(SignalRepository);
 
     const candidate = buildCandidate(new Date());
     logger.log(`Submitting a hand-built ${candidate.adapterKey} candidate...`);
 
-    const result = await dm.postSignal(candidate);
+    const result = await runs.track(candidate.adapterKey, 'push', async (ctx) => ({
+      result: await pipeline.process(candidate, ctx),
+      itemsFetched: 1,
+      candidatesEmitted: 1,
+    }));
 
     const row = await signals.findById(result.signalId);
     if (!row) throw new Error(`No ledger row was written for ${result.signalId}`);
 
-    if (row.status !== SignalStatus.DRY_RUN) {
+    const passing: string[] = [SignalStatus.DRY_RUN, SignalStatus.SUPPRESSED];
+    if (!passing.includes(row.status)) {
       throw new Error(
-        `Expected ledger status "${SignalStatus.DRY_RUN}", found "${row.status}". ` +
-          (row.dmResponse ? `Reason: ${row.dmResponse}` : 'No reason recorded.'),
+        `Expected ledger status ${passing.join(' or ')}, found "${row.status}". ` +
+          (row.dmResponse ? `Reason: ${JSON.stringify(row.dmResponse)}` : 'No reason recorded.'),
       );
     }
 
@@ -98,13 +109,15 @@ async function main(): Promise<void> {
           platform: row.platform,
           fingerprint: row.fingerprint,
           attempts: row.attempts,
+          postedAt: row.postedAt?.toISOString() ?? null,
+          dmResponse: row.dmResponse,
           createdAt: row.createdAt.toISOString(),
         },
         null,
         2,
       ),
     );
-    logger.log(`PASS: ${row.id} reached status=${SignalStatus.DRY_RUN} end to end.`);
+    logger.log(`PASS: ${row.id} reached status=${row.status} end to end.`);
   } finally {
     await app.close();
   }

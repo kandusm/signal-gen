@@ -1,7 +1,7 @@
 import type { Signal } from '@prisma/client';
 import type { Alert } from '../../src/notify';
-import type { CreatePendingInput, TerminalUpdate, UsageCounts } from '../../src/persistence';
-import { BUDGET_CONSUMING_STATUSES, SignalStatus } from '../../src/persistence';
+import type { AdmitInput, AdmitResult, CreatePendingInput, RunCounts, TerminalUpdate, UsageCounts } from '../../src/persistence';
+import { BUDGET_CONSUMING_STATUSES, SignalStatus, suppressionRecord } from '../../src/persistence';
 import type { DmHttpResult } from '../../src/dm';
 
 /**
@@ -48,6 +48,18 @@ export class FakeSignalRepository {
       subtopic: input.subtopic ?? null,
       payload: input.payload as never,
       status: SignalStatus.PENDING,
+      createdAt: this.now(),
+    });
+  }
+
+  async createRejected(input: CreatePendingInput, update: TerminalUpdate): Promise<Signal> {
+    if (this.rows.has(input.id)) throw new Error(`duplicate ledger id ${input.id}`);
+    return this.seed({
+      ...input,
+      subtopic: input.subtopic ?? null,
+      payload: input.payload as never,
+      status: update.status,
+      dmResponse: (update.dmResponse ?? null) as Signal['dmResponse'],
       createdAt: this.now(),
     });
   }
@@ -202,6 +214,7 @@ export class FakeConfigService {
       totalBudget24h?: number;
       budgets?: Record<string, number>;
       shortcodes?: Record<string, string>;
+      suppressDays?: Record<string, number>;
     } = {},
   ) {}
 
@@ -223,6 +236,11 @@ export class FakeConfigService {
 
   get budgetedAdapterKeys(): string[] {
     return Object.keys(this.values.budgets ?? { manual: 50, search: 100 });
+  }
+
+  suppressionWindowMs(adapterKey: string): number | undefined {
+    const days = (this.values.suppressDays ?? { manual: 7, search: 21 })[adapterKey];
+    return days === undefined ? undefined : days * 24 * 60 * 60 * 1000;
   }
 
   shortcodeFor(adapterKey: string): string | undefined {
@@ -247,4 +265,87 @@ export function httpResponse(
 
 export function transportError(message: string): DmHttpResult {
   return { kind: 'transport_error', message };
+}
+
+/**
+ * In-memory FingerprintRepository.admit with the production window semantics:
+ * a hash whose suppressUntil is still in the future suppresses; a lapsed one
+ * (including exactly-now) is reclaimed. JavaScript's single thread makes this
+ * atomic for free, so it proves the pipeline's use of admit, not the SQL — the
+ * race itself is proven against Postgres in test/db/.
+ */
+export class FakeFingerprintRepository {
+  readonly hashes = new Map<
+    string,
+    { adapterKey: string; firstSeenAt: Date; lastSeenAt: Date; lastPostedSignalId: string | null; suppressUntil: Date | null }
+  >();
+
+  constructor(private readonly signals: FakeSignalRepository) {}
+
+  async admit(input: AdmitInput): Promise<AdmitResult> {
+    const { signal, now, windowMs } = input;
+    const existing = this.hashes.get(signal.fingerprint);
+    const live = existing?.suppressUntil && existing.suppressUntil.getTime() > now.getTime();
+
+    if (existing && live) {
+      existing.lastSeenAt = now;
+      const row = await this.signals.createRejected(signal, {
+        status: SignalStatus.SUPPRESSED,
+        dmResponse: suppressionRecord(existing),
+      });
+      return { outcome: 'suppressed', signal: row };
+    }
+
+    this.hashes.set(signal.fingerprint, {
+      adapterKey: signal.adapterKey,
+      firstSeenAt: existing?.firstSeenAt ?? now,
+      lastSeenAt: now,
+      lastPostedSignalId: signal.id,
+      suppressUntil: new Date(now.getTime() + windowMs),
+    });
+    return { outcome: 'admitted', signal: await this.signals.createPending(signal) };
+  }
+}
+
+/** In-memory AdapterRunRepository. */
+export class FakeAdapterRunRepository {
+  readonly runs: Array<{
+    id: number;
+    adapterKey: string;
+    startedAt: Date;
+    finishedAt: Date | null;
+    status: string;
+    itemsFetched: number;
+    candidatesEmitted: number;
+    error: string | null;
+  }> = [];
+
+  async start(adapterKey: string, startedAt: Date) {
+    const run = {
+      id: this.runs.length + 1,
+      adapterKey,
+      startedAt,
+      finishedAt: null,
+      status: 'running',
+      itemsFetched: 0,
+      candidatesEmitted: 0,
+      error: null,
+    };
+    this.runs.push(run);
+    return run;
+  }
+
+  async finishOk(id: number, finishedAt: Date, counts: RunCounts) {
+    return Object.assign(this.require(id), { status: 'ok', finishedAt, ...counts });
+  }
+
+  async finishFailed(id: number, finishedAt: Date, error: string) {
+    return Object.assign(this.require(id), { status: 'failed', finishedAt, error });
+  }
+
+  private require(id: number) {
+    const run = this.runs.find((r) => r.id === id);
+    if (!run) throw new Error(`no run ${id}`);
+    return run;
+  }
 }

@@ -81,7 +81,7 @@ model AdapterRun {
   adapterKey        String
   startedAt         DateTime  @db.Timestamptz(3)
   finishedAt        DateTime? @db.Timestamptz(3)
-  /// ok | failed
+  /// running | ok | failed. A row left `running` is a run that crashed.
   status            String
   itemsFetched      Int       @default(0)
   candidatesEmitted Int       @default(0)

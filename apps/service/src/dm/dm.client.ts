@@ -1,30 +1,20 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { Signal } from '@prisma/client';
-import {
-  type CandidateSignal,
-  dmResponseSchemas,
-  dmSignalPayloadSchema,
-} from '@signalgen/contract';
+import { dmResponseSchemas } from '@signalgen/contract';
 import { CLOCK, type Clock, SLEEP, type Sleep, realSleep, systemClock } from '../common';
 import { ConfigService } from '../config';
 import { NotifyService } from '../notify';
 import { SignalRepository, SignalStatus } from '../persistence';
 import { BudgetService } from './budget.service';
 import { DmHttpClient, type DmHttpResult } from './dm.http';
-import { fingerprintFor } from './fingerprint';
 import {
   type LedgerResponse,
   describeLedgerResponse,
   fromDmResponse,
-  fromSchemaRejection,
-  fromToneRejection,
   fromTransportError,
 } from './ledger-response';
-import { buildDmPayload } from './payload.builder';
 import { RateLimitService } from './rate-limit.service';
 import { MAX_ATTEMPTS, classifyStatus, nextRetryDelayMs, parseRetryAfterSeconds } from './retry';
-import { buildSignalId } from './signal-id';
-import { TaxonomyService } from './taxonomy.service';
 
 /**
  * Longest we will block a worker honouring a Retry-After before parking the
@@ -59,104 +49,17 @@ export class DmClient {
     private readonly signals: SignalRepository,
     private readonly budget: BudgetService,
     private readonly rateLimit: RateLimitService,
-    private readonly taxonomy: TaxonomyService,
     private readonly notify: NotifyService,
     @Optional() @Inject(CLOCK) private readonly now: Clock = systemClock,
     @Optional() @Inject(SLEEP) private readonly sleep: Sleep = realSleep,
   ) {}
 
   /**
-   * Takes a candidate all the way to a ledger outcome.
-   *
-   * The ordering below is the load-bearing part of this class:
-   *
-   *   1. assign signalId          deterministic idempotency key
-   *   2. write the ledger row     BEFORE any network call, so a crash during
-   *                               dispatch leaves a recoverable `pending` row
-   *                               rather than an unknown
-   *   3. validate the payload     our own contract check; a failure here is a
-   *                               bug we should never have put on the wire
-   *   4. tone gate                match-quality check against DM's taxonomy
-   *   5. rate guards, then POST   see dispatch(); DRY_RUN skips only the POST
-   */
-  async postSignal(candidate: CandidateSignal): Promise<DispatchResult> {
-    const signalId = buildSignalId(
-      candidate.adapterKey,
-      this.config.shortcodeFor(candidate.adapterKey),
-    );
-    const sourceKey = this.config.generatorSourceKey;
-    const payload = buildDmPayload(candidate, { signalId, sourceKey });
-
-    // (2) Ledger first. Everything after this updates a row that already exists.
-    await this.signals.createPending({
-      id: signalId,
-      fingerprint: fingerprintFor(candidate),
-      adapterKey: candidate.adapterKey,
-      sourceKey,
-      topic: candidate.topic,
-      subtopic: candidate.subtopic,
-      tone: candidate.tone,
-      platform: candidate.platform,
-      payload: payload as never,
-    });
-    this.logger.log(`Ledgered ${signalId} (${candidate.adapterKey}) as pending`);
-
-    // (3) Our own wire-contract check.
-    const parsed = dmSignalPayloadSchema.safeParse(payload);
-    if (!parsed.success) {
-      const issues = parsed.error.issues.map((issue) => ({
-        path: issue.path.join('.') || '(root)',
-        message: issue.message,
-      }));
-      this.logger.error(
-        `Schema rejected ${signalId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`,
-      );
-      await this.signals.finalize(signalId, {
-        status: SignalStatus.REJECTED_SCHEMA,
-        dmResponse: fromSchemaRejection(issues),
-      });
-      return { signalId, status: SignalStatus.REJECTED_SCHEMA };
-    }
-
-    // (4) Tone gate.
-    const toneValid = await this.taxonomy.isValidTone(candidate.tone);
-    if (toneValid === false) {
-      const knownTones = this.taxonomy.peek()?.taxonomy.tones ?? [];
-      this.logger.error(`Tone "${candidate.tone}" rejected for ${signalId}`);
-      await this.signals.finalize(signalId, {
-        status: SignalStatus.REJECTED_TONE,
-        dmResponse: fromToneRejection(candidate.tone, knownTones),
-      });
-      // One alert per adapter per day: a drift hits every candidate an adapter
-      // emits, and the first one carries all the information.
-      await this.notify.sendThrottled(`tone_rejection:${candidate.adapterKey}`, {
-        kind: 'tone_rejection',
-        signalId,
-        status: SignalStatus.REJECTED_TONE,
-        adapterKey: candidate.adapterKey,
-        tone: candidate.tone,
-        knownTones,
-      });
-      return { signalId, status: SignalStatus.REJECTED_TONE };
-    }
-    if (toneValid === 'no_taxonomy' || toneValid === 'no_tones') {
-      // Nothing to check against. DM does not validate tone and an
-      // unrecognised one still matches via Tier 2/3 (dm-contract.md), so this
-      // degrades match quality rather than blocking the signal.
-      const reason = toneValid === 'no_taxonomy' ? 'no taxonomy available' : 'DM publishes no tones';
-      this.logger.warn(`Tone gate skipped for ${signalId}: ${reason}`);
-    }
-
-    const row = await this.signals.findById(signalId);
-    if (!row) throw new Error(`Ledger row ${signalId} vanished between write and dispatch`);
-    return this.dispatch(row);
-  }
-
-  /**
    * Rate guards, then POST, then ledger the outcome.
    *
-   * Also the sweep's entry point for a row that was parked, which is why it
-   * works from a persisted row rather than from a candidate.
+   * The pipeline's hand-off once a row is ledgered `pending` (PipelineService
+   * owns everything before this), and the sweep's entry point for a row that
+   * was parked — which is why it works from a persisted row, not a candidate.
    *
    * DRY_RUN skips only the POST (Phase 1 brief §1). Both guards still run, so
    * a dry run consumes a token and parks on an exhausted budget exactly as a
@@ -206,7 +109,9 @@ export class DmClient {
       return { signalId: signal.id, status: SignalStatus.PENDING, parkedReason: 'dry_run_hold' };
     }
 
-    // postedAt is when it would have been sent: the budget window reads it.
+    // For dry_run, postedAt is the budget-consumption timestamp: when this
+    // would have been sent. Nothing was posted. The trailing-24h window is
+    // measured on this column, so stamping it is what makes a dry run count.
     await this.signals.finalize(signal.id, { status: SignalStatus.DRY_RUN, postedAt: this.now() });
     this.logger.log(`DRY_RUN: ${signal.id} ledgered as dry_run, not sent`);
     return { signalId: signal.id, status: SignalStatus.DRY_RUN };

@@ -63,6 +63,22 @@ export function fromToneRejection(tone: string, knownTones: readonly string[]): 
   };
 }
 
+/**
+ * The policy screen matched a denylist rule. The rule is recorded whole, so the
+ * ledger alone answers "why was this blocked" (architecture-spec.md §5).
+ */
+export function fromPolicyRejection(rule: {
+  pattern: string;
+  match: string;
+  scope: string;
+  reason: string;
+}): LedgerResponse {
+  return {
+    error: 'POLICY_REJECTED',
+    rule: { pattern: rule.pattern, match: rule.match, scope: rule.scope, reason: rule.reason },
+  };
+}
+
 /** Renders a stored response for an alert email, which is plain text. */
 export function describeLedgerResponse(value: unknown): string {
   if (value === null || value === undefined) return '(none)';

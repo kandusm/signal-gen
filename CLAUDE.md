@@ -197,7 +197,9 @@ access application — until then Reddit content is reached through
 apps/service/       NestJS 11, Node 22. The whole service.
   src/config/       zod-validated env, fail-fast at boot
   src/persistence/  Prisma schema + repositories (the ledger)
-  src/dm/           DM client, budgets, retries, taxonomy, sweep cron
+  src/dm/           DM client (dispatch), budgets, retries, taxonomy, sweep cron
+  src/pipeline/     stage order: schema → policy → tone → dedup → ledger → dispatch
+  src/adapters/     SourceAdapter, AdapterRegistry; one directory per adapter
   src/notify/       MailWain alerts
   src/health/       GET /healthz
   scripts/          seed-candidate.ts — the dry-run rehearsal
@@ -235,3 +237,20 @@ config shape carries over to the Phase 4 Next.js app.
 Time-dependent behaviour (6h TTL, token bucket, trailing 24h, retry schedule)
 is tested through the injected `Clock` and `Sleep` from `src/common`. Do not
 introduce a test that sleeps.
+
+`test/db/` holds what an in-memory fake cannot prove — above all the dedup
+race (two identical candidates → exactly one `pending`). It needs local
+Postgres and is skipped by the offline `pnpm test`:
+
+```bash
+docker compose up -d db
+pnpm --filter @signalgen/service test:db   # creates signalgen_test, migrates, runs
+```
+
+`test:db` runs `assert-local-db.mjs` first and uses `127.0.0.1`, not
+`localhost`: on Windows the latter tries IPv6 first and stalls each new
+connection ~2s, which is Prisma's transaction `maxWait`.
+
+Nest DI in a test runs through esbuild, which emits no parameter-type
+metadata. A class resolved by Nest in tests needs explicit `@Inject(Token)`
+on its constructor parameters, or its dependencies arrive `undefined`.

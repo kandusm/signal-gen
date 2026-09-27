@@ -1,6 +1,7 @@
 /**
  * Ledger states (architecture-spec.md §7, plus `rejected_tone` from the
- * Phase 0 brief's tone gate).
+ * Phase 0 brief's tone gate and `rejected_policy` from spec §5's policy
+ * screen).
  *
  * Stored as a plain string column rather than a Postgres enum: adding a state
  * should be a code change, not a migration that locks the table.
@@ -10,7 +11,7 @@ export const SignalStatus = {
   PENDING: 'pending',
   /** DM accepted it (202), or confirmed it already had it (200 DUPLICATE). */
   POSTED: 'posted',
-  /** Dedup suppressed it. Phase 1. */
+  /** A live fingerprint already covered it (spec §8). Recorded, never sent. */
   SUPPRESSED: 'suppressed',
   /** DRY_RUN was on; passed every guard, ledgered, never sent. */
   DRY_RUN: 'dry_run',
@@ -22,6 +23,8 @@ export const SignalStatus = {
   REJECTED_SCHEMA: 'rejected_schema',
   /** Tone not in DM's taxonomy; never sent. */
   REJECTED_TONE: 'rejected_tone',
+  /** Matched the policy denylist (spec §5); never sent, never fingerprinted. */
+  REJECTED_POLICY: 'rejected_policy',
 } as const;
 
 export type SignalStatus = (typeof SignalStatus)[keyof typeof SignalStatus];
@@ -50,4 +53,5 @@ export const TERMINAL_STATUSES: readonly SignalStatus[] = [
   SignalStatus.FAILED_PERMANENT,
   SignalStatus.REJECTED_SCHEMA,
   SignalStatus.REJECTED_TONE,
+  SignalStatus.REJECTED_POLICY,
 ];

@@ -1,5 +1,4 @@
 export * from './signal-id';
-export * from './fingerprint';
 export * from './payload.builder';
 export * from './token-bucket';
 export * from './retry';

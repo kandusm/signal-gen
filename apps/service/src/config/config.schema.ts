@@ -94,6 +94,12 @@ export const envSchema = z.object({
   BUDGET_MANUAL_24H: positiveIntFromEnv(50),
   BUDGET_SEARCH_24H: positiveIntFromEnv(100),
 
+  // --- Dedup suppression windows (architecture-spec.md §8) --------------
+  /** Humans repeating themselves quickly is usually intentional: short window. */
+  SUPPRESS_MANUAL_DAYS: positiveIntFromEnv(7),
+  /** Per result-URL fingerprint: each piece of content emits at most once. */
+  SUPPRESS_SEARCH_DAYS: positiveIntFromEnv(21),
+
   // --- signalId shortcodes ----------------------------------------------
   /**
    * Adapter shortcode map, as `adapterKey:code` pairs.

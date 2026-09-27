@@ -14,6 +14,7 @@ import { RegisterAdapter, type SourceAdapter } from './source-adapter';
  *   - no shortcode → its signalIds would carry a derived prefix nobody chose
  *   - no budget cap → ConfigService.budgetFor fails closed at 0, so it could
  *     never post, and the only symptom would be pending rows piling up
+ *   - no suppression window → the pipeline could not decide dedup at all
  */
 @Injectable()
 export class AdapterRegistry implements OnModuleInit {
@@ -54,6 +55,9 @@ export class AdapterRegistry implements OnModuleInit {
       }
       if (!this.config.budgetedAdapterKeys.includes(key)) {
         problems.push(`adapter "${key}" has no trailing-24h budget cap`);
+      }
+      if (this.config.suppressionWindowMs(key) === undefined) {
+        problems.push(`adapter "${key}" has no dedup suppression window`);
       }
     }
     if (problems.length > 0) {

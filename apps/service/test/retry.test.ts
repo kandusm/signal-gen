@@ -1,8 +1,11 @@
+import type { CandidateSignal } from '@signalgen/contract';
 import { describe, expect, it } from 'vitest';
 import { type Clock, fixedClock } from '../src/common';
 import {
   BudgetService,
   DmClient,
+  buildDmPayload,
+  buildSignalId,
   INLINE_RETRY_WAIT_CAP_MS,
   MAX_ATTEMPTS,
   RETRY_SCHEDULE_MS,
@@ -87,16 +90,6 @@ describe('parseRetryAfterSeconds', () => {
   });
 });
 
-/** Taxonomy stub that accepts every tone, so the gate never interferes. */
-const permissiveTaxonomy = {
-  async isValidTone() {
-    return true as const;
-  },
-  peek() {
-    return null;
-  },
-};
-
 interface Harness {
   clock: Clock & { advance(ms: number): void };
   signals: FakeSignalRepository;
@@ -136,7 +129,6 @@ function setup(results: ReturnType<typeof httpResponse>[], options: { dryRun?: b
     signals as never,
     budget as never,
     rateLimit,
-    permissiveTaxonomy as never,
     notify as never,
     clock,
     sleep,
@@ -145,7 +137,7 @@ function setup(results: ReturnType<typeof httpResponse>[], options: { dryRun?: b
   return { clock, signals, http, notify, dm, slept };
 }
 
-function candidate(overrides: Record<string, unknown> = {}) {
+function candidate(overrides: Record<string, unknown> = {}): CandidateSignal {
   return {
     adapterKey: 'manual',
     capturedAt: NOW.toISOString(),
@@ -155,7 +147,28 @@ function candidate(overrides: Record<string, unknown> = {}) {
     platform: 'LinkedIn',
     taxonomyAligned: true,
     ...overrides,
-  } as never;
+  } as CandidateSignal;
+}
+
+/**
+ * Ledgers a pending row the way PipelineService does, then dispatches it.
+ * The stages before this point are PipelineService's and tested there; this
+ * suite is about what DmClient does with a row once it exists.
+ */
+async function submit(h: { dm: DmClient; signals: FakeSignalRepository }, c: CandidateSignal) {
+  const signalId = buildSignalId(c.adapterKey, c.adapterKey === 'search' ? 'srch' : 'man');
+  const row = await h.signals.createPending({
+    id: signalId,
+    fingerprint: `fp_${signalId}`,
+    adapterKey: c.adapterKey,
+    sourceKey: 'signalgen-v1',
+    topic: c.topic,
+    subtopic: c.subtopic,
+    tone: c.tone,
+    platform: c.platform,
+    payload: buildDmPayload(c, { signalId, sourceKey: 'signalgen-v1' }) as never,
+  });
+  return h.dm.dispatch(row);
 }
 
 const ACCEPTED = () => httpResponse(202, { signalId: 'x', status: 'ACCEPTED', matchingScheduled: true });
@@ -166,67 +179,21 @@ const DUPLICATE = () =>
     originalCapturedAt: '2026-09-19T10:00:00Z',
   });
 
-describe('DmClient — ledger ordering', () => {
-  it('writes a pending ledger row before the first network attempt', async () => {
-    const clock = fixedClock(NOW);
-    const signals = new FakeSignalRepository(clock);
-    const notify = new FakeNotifyService();
-    const observed: string[] = [];
-
-    // Records the ledger state as it looked at the moment the POST was made.
-    const http = {
-      async postSignal(_payload: unknown, signalId: string) {
-        observed.push(signals.rows.get(signalId)?.status ?? 'ABSENT');
-        return ACCEPTED();
-      },
-    };
-
-    const dm = new DmClient(
-      new FakeConfigService({ dryRun: false, budgets: { manual: 50 } }) as never,
-      http as never,
-      signals as never,
-      {
-        async check() {
-          return { allowed: true as const, usage: { total: 0, byAdapter: {} } };
-        },
-        async usage() {
-          return { total: 0, byAdapter: {} };
-        },
-      } as never,
-      new RateLimitService(clock),
-      permissiveTaxonomy as never,
-      notify as never,
-      clock,
-    );
-
-    await dm.postSignal(candidate());
-    expect(observed).toEqual([SignalStatus.PENDING]);
-  });
-
+describe('DmClient — dispatch identity', () => {
   it('sends the same signalId in the body and the Idempotency-Key', async () => {
     const h = setup([ACCEPTED()]);
-    const result = await h.dm.postSignal(candidate());
+    const result = await submit(h, candidate());
 
     const post = h.http.posts[0];
     expect(post?.signalId).toBe(result.signalId);
     expect((post?.payload as { signalId: string }).signalId).toBe(result.signalId);
-  });
-
-  it('prefixes the signalId with the configured shortcode', async () => {
-    const manual = setup([ACCEPTED()]);
-    expect((await manual.dm.postSignal(candidate())).signalId).toMatch(/^man_/);
-
-    const search = setup([ACCEPTED()]);
-    expect(
-      (await search.dm.postSignal(candidate({ adapterKey: 'search', platform: 'Web' }))).signalId,
-    ).toMatch(/^srch_/);
   });
 });
 
 describe('DmClient — terminal transitions', () => {
   it('202 marks the row posted and stamps postedAt', async () => {
     const h = setup([ACCEPTED()]);
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(status).toBe(SignalStatus.POSTED);
     const row = h.signals.rows.get(signalId);
@@ -239,7 +206,7 @@ describe('DmClient — terminal transitions', () => {
 
   it('200 DUPLICATE also counts as posted, and raises no alert', async () => {
     const h = setup([DUPLICATE()]);
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(status).toBe(SignalStatus.POSTED);
     const row = h.signals.rows.get(signalId);
@@ -258,7 +225,7 @@ describe('DmClient — terminal transitions', () => {
         details: [{ field: 'tone', message: "Value 'Sarcastic' is not a recognized tone" }],
       }),
     ]);
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(status).toBe(SignalStatus.FAILED_PERMANENT);
     const row = h.signals.rows.get(signalId);
@@ -276,7 +243,7 @@ describe('DmClient — terminal transitions', () => {
 
   it('401 is permanent too', async () => {
     const h = setup([httpResponse(401, null)]);
-    const { status } = await h.dm.postSignal(candidate());
+    const { status } = await submit(h, candidate());
     expect(status).toBe(SignalStatus.FAILED_PERMANENT);
     expect(h.notify.kinds()).toEqual(['permanent_failure']);
   });
@@ -285,7 +252,7 @@ describe('DmClient — terminal transitions', () => {
 describe('DmClient — retry schedule', () => {
   it('books the first retry one minute out after a 500', async () => {
     const h = setup([httpResponse(500, { error: 'boom' })]);
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(status).toBe(SignalStatus.PENDING);
     const row = h.signals.rows.get(signalId);
@@ -297,7 +264,7 @@ describe('DmClient — retry schedule', () => {
 
   it('treats a transport error as retryable and records the reason', async () => {
     const h = setup([transportError('ECONNREFUSED')]);
-    const { signalId } = await h.dm.postSignal(candidate());
+    const { signalId } = await submit(h, candidate());
 
     const row = h.signals.rows.get(signalId);
     expect(row?.status).toBe(SignalStatus.PENDING);
@@ -344,7 +311,7 @@ describe('DmClient — 429 handling', () => {
       ACCEPTED(),
     ]);
 
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(h.slept).toEqual([42_000]);
     expect(status).toBe(SignalStatus.POSTED);
@@ -360,7 +327,7 @@ describe('DmClient — 429 handling', () => {
       httpResponse(429, { error: 'RATE_LIMITED', limit: '10/min', retryAfter: tooLong }, String(tooLong)),
     ]);
 
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(h.slept).toEqual([]);
     expect(status).toBe(SignalStatus.PENDING);
@@ -378,7 +345,7 @@ describe('DmClient — 429 handling', () => {
       httpResponse(429, { error: 'RATE_LIMITED', limit: '10/min', retryAfter: 5 }, '5'),
     ]);
 
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(h.slept).toEqual([5_000]);
     expect(status).toBe(SignalStatus.PENDING);
@@ -390,7 +357,7 @@ describe('DmClient — 429 handling', () => {
   it('falls back to the schedule when a 429 carries no Retry-After', async () => {
     const h = setup([httpResponse(429, { error: 'RATE_LIMITED', limit: '10/min', retryAfter: 0 })]);
 
-    const { signalId } = await h.dm.postSignal(candidate());
+    const { signalId } = await submit(h, candidate());
 
     expect(h.slept).toEqual([]);
     expect(h.signals.rows.get(signalId)?.nextAttemptAt).toEqual(new Date(NOW.getTime() + 60_000));
@@ -400,7 +367,7 @@ describe('DmClient — 429 handling', () => {
 describe('DmClient — guards', () => {
   it('DRY_RUN writes a dry_run row and makes no request', async () => {
     const h = setup([], { dryRun: true });
-    const { signalId, status } = await h.dm.postSignal(candidate());
+    const { signalId, status } = await submit(h, candidate());
 
     expect(status).toBe(SignalStatus.DRY_RUN);
     expect(h.signals.rows.get(signalId)?.status).toBe(SignalStatus.DRY_RUN);
@@ -410,33 +377,16 @@ describe('DmClient — guards', () => {
     expect(h.http.posts).toHaveLength(0);
   });
 
-  it('rejects a schema-invalid payload without sending it', async () => {
-    const h = setup([]);
-    // 21 keywords: one past what dm-contract.md allows.
-    const { signalId, status } = await h.dm.postSignal(
-      candidate({ keywords: Array.from({ length: 21 }, (_, i) => `kw${i}`) }),
-    );
-
-    expect(status).toBe(SignalStatus.REJECTED_SCHEMA);
-    expect(h.http.posts).toHaveLength(0);
-    const row = h.signals.rows.get(signalId);
-    expect(row?.status).toBe(SignalStatus.REJECTED_SCHEMA);
-    expect(row?.dmResponse).toMatchObject({
-      error: 'VALIDATION_FAILED_LOCAL',
-      details: [{ field: 'keywords' }],
-    });
-  });
-
   it('parks the row when the local token bucket is empty', async () => {
     // Eleven scripted successes: ten drain the bucket, the eleventh is for
     // the retry after it refills.
     const h = setup(Array.from({ length: 11 }, () => ACCEPTED()));
 
     for (let i = 0; i < 10; i += 1) {
-      expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.POSTED);
+      expect((await submit(h, candidate())).status).toBe(SignalStatus.POSTED);
     }
 
-    const eleventh = await h.dm.postSignal(candidate());
+    const eleventh = await submit(h, candidate());
     expect(eleventh.status).toBe(SignalStatus.PENDING);
     expect(eleventh.parkedReason).toBe('rate_limited_local');
     expect(h.http.posts).toHaveLength(10);
@@ -448,128 +398,14 @@ describe('DmClient — guards', () => {
   });
 });
 
-describe('DmClient — tone gate', () => {
-  /** `null` = no taxonomy; `'absent'` = taxonomy loaded without tones. */
-  function toneHarness(tones: string[] | null | 'absent') {
-    const clock = fixedClock(NOW);
-    const signals = new FakeSignalRepository(clock);
-    const http = new FakeDmHttpClient([ACCEPTED(), ACCEPTED()]);
-    const notify = new FakeNotifyService();
-    const taxonomy = {
-      async isValidTone(tone: string) {
-        if (tones === null) return 'no_taxonomy' as const;
-        if (tones === 'absent') return 'no_tones' as const;
-        return tones.includes(tone);
-      },
-      peek() {
-        if (tones === null) return null;
-        const taxonomy = tones === 'absent' ? { categories: [] } : { categories: [], tones };
-        return { taxonomy, fetchedAt: NOW, fromSnapshot: false };
-      },
-    };
-    const dm = new DmClient(
-      new FakeConfigService({ dryRun: false, budgets: { manual: 50 } }) as never,
-      http as never,
-      signals as never,
-      {
-        async check() {
-          return { allowed: true as const, usage: { total: 0, byAdapter: {} } };
-        },
-        async usage() {
-          return { total: 0, byAdapter: {} };
-        },
-      } as never,
-      new RateLimitService(clock),
-      taxonomy as never,
-      notify as never,
-      clock,
-    );
-    return { dm, signals, http, notify };
-  }
-
-  it('rejects an unknown tone before dispatch and alerts once per adapter', async () => {
-    const h = toneHarness(['Professional', 'Humor']);
-
-    const first = await h.dm.postSignal(candidate({ tone: 'Sarcastic' }));
-    expect(first.status).toBe(SignalStatus.REJECTED_TONE);
-    expect(h.http.posts).toHaveLength(0);
-    expect(h.signals.rows.get(first.signalId)?.dmResponse).toMatchObject({
-      error: 'TONE_REJECTED',
-      tone: 'Sarcastic',
-      knownTones: ['Professional', 'Humor'],
-    });
-    expect(h.notify.kinds()).toEqual(['tone_rejection']);
-
-    // Same adapter, same day: ledgered again, but no second email.
-    const second = await h.dm.postSignal(candidate({ tone: 'Sarcastic' }));
-    expect(second.status).toBe(SignalStatus.REJECTED_TONE);
-    expect(h.notify.kinds()).toEqual(['tone_rejection']);
-    expect(h.notify.throttledKeys).toEqual(['tone_rejection:manual', 'tone_rejection:manual']);
-  });
-
-  it('lets a valid tone through', async () => {
-    const h = toneHarness(['Professional', 'Humor']);
-    expect((await h.dm.postSignal(candidate({ tone: 'Professional' }))).status).toBe(
-      SignalStatus.POSTED,
-    );
-  });
-
-  it('does not reject when there is no taxonomy to check against', async () => {
-    // dm-contract.md: an unrecognised tone still matches via Tier 2/3, so a DM
-    // outage must not turn into a total rejection.
-    const h = toneHarness(null);
-    expect((await h.dm.postSignal(candidate({ tone: 'Anything' }))).status).toBe(
-      SignalStatus.POSTED,
-    );
-    expect(h.notify.sent).toHaveLength(0);
-  });
-
-  it('does not reject when the taxonomy carries no tones', async () => {
-    // DM serves categories before it publishes tones. The gate skips; it
-    // does not treat an absent list as "no tone is valid".
-    const h = toneHarness('absent');
-    expect((await h.dm.postSignal(candidate({ tone: 'Anything' }))).status).toBe(
-      SignalStatus.POSTED,
-    );
-    expect(h.notify.sent).toHaveLength(0);
-  });
-});
-
-describe('DmClient — payload assembly', () => {
-  it('moves taxonomyAligned into extensions and drops adapterKey', async () => {
-    const harness = setup([ACCEPTED()]);
-    await harness.dm.postSignal(
-      candidate({ taxonomyAligned: false, extensions: { source: 'test' } }),
-    );
-
-    const payload = harness.http.posts[0]?.payload as Record<string, unknown>;
-    expect(payload['adapterKey']).toBeUndefined();
-    expect(payload['taxonomyAligned']).toBeUndefined();
-    expect(payload['extensions']).toEqual({ source: 'test', taxonomyAligned: false });
-  });
-
-  it('stamps the configured generator sourceKey', async () => {
-    const harness = setup([ACCEPTED()]);
-    await harness.dm.postSignal(candidate());
-    const payload = harness.http.posts[0]?.payload as Record<string, unknown>;
-    expect(payload['sourceKey']).toBe('signalgen-v1');
-  });
-
-  it('omits fields the adapter left undefined', async () => {
-    const harness = setup([ACCEPTED()]);
-    await harness.dm.postSignal(candidate({ subtopic: undefined }));
-    const payload = harness.http.posts[0]?.payload as Record<string, unknown>;
-    expect('subtopic' in payload).toBe(false);
-  });
-});
-
 /**
  * Phase 1 brief §1: DRY_RUN skips only the network call. These run against the
  * real BudgetService over the in-memory ledger, so a dry_run row written by one
- * submission is what the budget check sees on the next.
+ * submission is what the budget check sees on the next. (That the schema,
+ * policy and tone stages still run in dry-run is covered in pipeline.test.ts.)
  */
 describe('DmClient — DRY_RUN skips only the network call', () => {
-  function dryRunHarness(options: { manualBudget?: number; tones?: string[] } = {}) {
+  function dryRunHarness(options: { manualBudget?: number } = {}) {
     const clock = fixedClock(NOW);
     const signals = new FakeSignalRepository(clock);
     const http = new FakeDmHttpClient([]);
@@ -579,24 +415,12 @@ describe('DmClient — DRY_RUN skips only the network call', () => {
       totalBudget24h: 500,
       budgets: { manual: options.manualBudget ?? 50, search: 100 },
     });
-    const tones = options.tones;
-    const taxonomy = tones
-      ? {
-          async isValidTone(tone: string) {
-            return tones.includes(tone);
-          },
-          peek() {
-            return { taxonomy: { categories: [], tones }, fetchedAt: NOW, fromSnapshot: false };
-          },
-        }
-      : permissiveTaxonomy;
     const dm = new DmClient(
       config as never,
       http as never,
       signals as never,
       new BudgetService(config as never, signals as never),
       new RateLimitService(clock),
-      taxonomy as never,
       notify as never,
       clock,
     );
@@ -606,9 +430,9 @@ describe('DmClient — DRY_RUN skips only the network call', () => {
   it('counts dry_run rows against the adapter cap and parks once it is reached', async () => {
     const h = dryRunHarness({ manualBudget: 2 });
 
-    expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
-    expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
-    const third = await h.dm.postSignal(candidate());
+    expect((await submit(h, candidate())).status).toBe(SignalStatus.DRY_RUN);
+    expect((await submit(h, candidate())).status).toBe(SignalStatus.DRY_RUN);
+    const third = await submit(h, candidate());
 
     expect(third.status).toBe(SignalStatus.PENDING);
     expect(third.parkedReason).toBe('budget_exhausted');
@@ -619,27 +443,14 @@ describe('DmClient — DRY_RUN skips only the network call', () => {
   it('consumes a rate-limit token, so an eleventh rehearsal in a minute parks', async () => {
     const h = dryRunHarness();
     for (let i = 0; i < 10; i += 1) {
-      expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
+      expect((await submit(h, candidate())).status).toBe(SignalStatus.DRY_RUN);
     }
 
-    const eleventh = await h.dm.postSignal(candidate());
+    const eleventh = await submit(h, candidate());
 
     expect(eleventh.status).toBe(SignalStatus.PENDING);
     expect(eleventh.parkedReason).toBe('rate_limited_local');
     expect(h.http.posts).toHaveLength(0);
-  });
-
-  it('still runs the tone gate', async () => {
-    const h = dryRunHarness({ tones: ['Professional'] });
-    expect((await h.dm.postSignal(candidate({ tone: 'Sarcastic' }))).status).toBe(
-      SignalStatus.REJECTED_TONE,
-    );
-  });
-
-  it('does not count a rejected row against the budget', async () => {
-    const h = dryRunHarness({ manualBudget: 1, tones: ['Professional'] });
-    await h.dm.postSignal(candidate({ tone: 'Sarcastic' }));
-    expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
   });
 
   it('never relabels a row that already made a real attempt', async () => {

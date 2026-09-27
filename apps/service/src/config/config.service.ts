@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import type { AdapterKey } from '@signalgen/contract';
 import type { Env } from './config.schema';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /** Typed, read-only access to validated configuration. */
 @Injectable()
 export class ConfigService {
@@ -41,6 +43,25 @@ export class ConfigService {
       default:
         return 0;
     }
+  }
+
+  /**
+   * How long a claimed fingerprint suppresses repeats, or undefined for an
+   * adapter with no configured window. AdapterRegistry refuses to boot with
+   * such an adapter, so the pipeline never has to guess one.
+   */
+  suppressionWindowMs(adapterKey: AdapterKey): number | undefined {
+    const days = (() => {
+      switch (adapterKey) {
+        case 'manual':
+          return this.env.SUPPRESS_MANUAL_DAYS;
+        case 'search':
+          return this.env.SUPPRESS_SEARCH_DAYS;
+        default:
+          return undefined;
+      }
+    })();
+    return days === undefined ? undefined : days * DAY_MS;
   }
 
   /** Adapters that have a configured budget, for /healthz reporting. */

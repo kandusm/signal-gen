@@ -44,7 +44,7 @@ describe('AdapterRegistry — validation', () => {
   });
 
   it('reports every problem in one error, so one boot surfaces them all', () => {
-    const r = registry(new FakeConfigService({ shortcodes: {}, budgets: {} }));
+    const r = registry(new FakeConfigService({ shortcodes: {}, budgets: {}, suppressDays: {} }));
     r.register(adapter('rss'));
     r.register(adapter('atom'));
     const error = (() => {
@@ -55,7 +55,16 @@ describe('AdapterRegistry — validation', () => {
       }
       return '';
     })();
-    expect(error.match(/^ {2}- /gm)).toHaveLength(4);
+    // Two adapters, three missing settings each.
+    expect(error.match(/^ {2}- /gm)).toHaveLength(6);
+  });
+
+  it('rejects an adapter with no dedup suppression window', () => {
+    const r = registry(
+      new FakeConfigService({ shortcodes: { rss: 'rss' }, budgets: { rss: 10 }, suppressDays: {} }),
+    );
+    r.register(adapter('rss'));
+    expect(() => r.validate()).toThrow(/"rss" has no dedup suppression window/);
   });
 
   it('refuses a key registered twice', () => {

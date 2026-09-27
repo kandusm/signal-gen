@@ -1,0 +1,4 @@
+{
+  "$comment": "Policy screen denylist (architecture-spec.md section 5). Repo-reviewed: every change here goes through a PR. Rule shape: { pattern, match: word|substring (default word), scope: topic|keywords|excerpt|all (default all), reason }. Matching is case-folded. Empty until Phase 2 drafts the content alongside the search watchlist.",
+  "rules": []
+}

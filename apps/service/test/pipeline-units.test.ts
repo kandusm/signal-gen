@@ -7,8 +7,9 @@ import {
   buildDmPayload,
   buildSignalId,
   deriveShortcode,
-  fingerprintFor,
 } from '../src/dm';
+import { ManualAdapter } from '../src/adapters/manual';
+import { fingerprintOf } from '../src/pipeline';
 
 describe('deriveShortcode', () => {
   it('derives a shortcode for an adapter config has not registered', () => {
@@ -62,37 +63,46 @@ describe('buildSignalId', () => {
   });
 });
 
-describe('fingerprintFor', () => {
-  const base = { adapterKey: 'manual', topic: 'Pipe Welding', subtopic: 'Safety' };
-
-  it('is stable for the same inputs', () => {
-    expect(fingerprintFor(base)).toBe(fingerprintFor({ ...base }));
-  });
-
-  it('normalises case and surrounding whitespace', () => {
-    expect(fingerprintFor({ ...base, topic: '  pipe welding  ', subtopic: 'SAFETY' })).toBe(
-      fingerprintFor(base),
-    );
+describe('fingerprintOf', () => {
+  it('hashes adapterKey | material as sha256 hex', () => {
+    expect(fingerprintOf('manual', 'x|y')).toMatch(/^[0-9a-f]{64}$/);
+    expect(fingerprintOf('manual', 'x|y')).toBe(fingerprintOf('manual', 'x|y'));
   });
 
   it('separates adapters, so per-source suppression windows can differ', () => {
     // architecture-spec.md section 8 gives search a 21-day window and manual a
     // 7-day one; that only works if the adapter is part of the hash.
-    expect(fingerprintFor({ ...base, adapterKey: 'search' })).not.toBe(fingerprintFor(base));
+    expect(fingerprintOf('search', 'x|y')).not.toBe(fingerprintOf('manual', 'x|y'));
   });
 
-  it('distinguishes a missing subtopic from an empty one consistently', () => {
-    const withUndefined = fingerprintFor({ adapterKey: 'manual', topic: 'X' });
-    const withEmpty = fingerprintFor({ adapterKey: 'manual', topic: 'X', subtopic: '  ' });
-    expect(withUndefined).toBe(withEmpty);
+  it('matches the Phase 0 manual fingerprint, so existing ledger rows stay comparable', () => {
+    // Phase 0 hashed "manual|trades|welding" directly; the seed row
+    // man_01M3HSMPFGC6AGM3A2KQKHY9DA carries this value.
+    expect(fingerprintOf('manual', 'trades|welding')).toBe(
+      'ea6bb160970c13ea18b68b3bbe1a1ee9fdb986bd2592225a5220dbdfc5488b6f',
+    );
+  });
+});
+
+describe('ManualAdapter.fingerprintMaterial', () => {
+  const adapter = new ManualAdapter();
+  const material = (topic: string, subtopic?: string) =>
+    adapter.fingerprintMaterial({ topic, subtopic } as CandidateSignal);
+
+  it('is lowercase(trim(topic)) | lowercase(trim(subtopic ?? ""))', () => {
+    expect(material('Pipe Welding', 'Safety')).toBe('pipe welding|safety');
+  });
+
+  it('normalises case and surrounding whitespace', () => {
+    expect(material('  pipe welding  ', 'SAFETY')).toBe(material('Pipe Welding', 'Safety'));
+  });
+
+  it('treats a missing subtopic and a blank one alike', () => {
+    expect(material('X')).toBe(material('X', '  '));
   });
 
   it('changes when the topic changes', () => {
-    expect(fingerprintFor({ ...base, topic: 'Stick Welding' })).not.toBe(fingerprintFor(base));
-  });
-
-  it('produces a sha256 hex digest', () => {
-    expect(fingerprintFor(base)).toMatch(/^[0-9a-f]{64}$/);
+    expect(material('Stick Welding', 'Safety')).not.toBe(material('Pipe Welding', 'Safety'));
   });
 });
 

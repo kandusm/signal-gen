@@ -27,8 +27,23 @@ export interface TerminalUpdate {
  * Prisma will not accept a bare `null` for a nullable Json column -- it cannot
  * tell "SQL NULL" from "the JSON value null". DbNull is the explicit former.
  */
-function jsonOrNull(value: Prisma.InputJsonValue | undefined): Prisma.InputJsonValue | typeof Prisma.DbNull {
+export function jsonOrNull(value: Prisma.InputJsonValue | undefined): Prisma.InputJsonValue | typeof Prisma.DbNull {
   return value === undefined ? Prisma.DbNull : value;
+}
+
+/** The identifying columns every ledger row carries, whatever its status. */
+export function ledgerFields(input: CreatePendingInput) {
+  return {
+    id: input.id,
+    fingerprint: input.fingerprint,
+    adapterKey: input.adapterKey,
+    sourceKey: input.sourceKey,
+    topic: input.topic,
+    subtopic: input.subtopic ?? null,
+    tone: input.tone,
+    platform: input.platform,
+    payload: input.payload,
+  };
 }
 
 /** Trailing-window usage, total and broken out per adapter. */
@@ -47,18 +62,19 @@ export class SignalRepository {
    * that may or may not have reached DM.
    */
   createPending(input: CreatePendingInput): Promise<Signal> {
+    return this.prisma.signal.create({ data: { ...ledgerFields(input), status: SignalStatus.PENDING } });
+  }
+
+  /**
+   * A row that is terminal from birth: rejected before it could be dispatched.
+   * Recorded so the ledger shows what the pipeline turned away and why.
+   */
+  createRejected(input: CreatePendingInput, update: TerminalUpdate): Promise<Signal> {
     return this.prisma.signal.create({
       data: {
-        id: input.id,
-        fingerprint: input.fingerprint,
-        adapterKey: input.adapterKey,
-        sourceKey: input.sourceKey,
-        topic: input.topic,
-        subtopic: input.subtopic ?? null,
-        tone: input.tone,
-        platform: input.platform,
-        payload: input.payload,
-        status: SignalStatus.PENDING,
+        ...ledgerFields(input),
+        status: update.status,
+        dmResponse: jsonOrNull(update.dmResponse),
       },
     });
   }

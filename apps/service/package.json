@@ -9,6 +9,7 @@
     "start:dev": "nest start --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:db": "node scripts/test-db.mjs",
     "prisma:generate": "prisma generate",
     "migrate:dev": "node --env-file-if-exists=.env scripts/assert-local-db.mjs && prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
