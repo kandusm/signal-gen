@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+**/dist
+**/coverage
+.git
+.gitignore
+.github
+docs
+*.md
+
+# Secrets. These patterns are deliberately **-prefixed: .dockerignore matches
+# from the context root only, so a bare `.env` would NOT exclude
+# apps/service/.env.local -- and the build does `COPY . .`.
+**/.env
+**/.env.*
+!**/.env.example

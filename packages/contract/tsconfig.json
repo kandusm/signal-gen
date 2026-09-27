@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // DOM is here for TextEncoder (see src/payload.ts). This package is also
+    // consumed by the Phase 4 Next.js form per build-plan.md §2, so it must
+    // typecheck against browser globals and must not assume @types/node.
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["src/**/*.ts"]
+}

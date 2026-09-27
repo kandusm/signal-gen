@@ -1,0 +1,42 @@
+{
+  "name": "@signalgen/service",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "prisma generate && nest build",
+    "prepare": "prisma generate",
+    "start": "node --env-file-if-exists=.env --env-file-if-exists=.env.local dist/main.js",
+    "start:dev": "nest start --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prisma:generate": "prisma generate",
+    "migrate:dev": "node --env-file-if-exists=.env scripts/assert-local-db.mjs && prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:deploy:remote": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/remote-prisma.mjs migrate deploy",
+    "migrate:status:remote": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/remote-prisma.mjs migrate status",
+    "seed:candidate": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --require ts-node/register scripts/seed-candidate.ts",
+    "migrate:reset": "node --env-file-if-exists=.env scripts/assert-local-db.mjs && prisma migrate reset"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/schedule": "^6.0.0",
+    "@prisma/client": "6.19.3",
+    "@signalgen/contract": "workspace:*",
+    "prisma": "6.19.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "ulid": "^3.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/testing": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

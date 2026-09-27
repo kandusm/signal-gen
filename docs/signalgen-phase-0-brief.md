@@ -65,7 +65,7 @@ ConfigModule (zod-validated env, fail-fast at boot):
   DATABASE_URL, DIRECT_URL, DM_BASE_URL, DM_SIGNAL_KEY,
   GENERATOR_SOURCE_KEY (default "signalgen-v1"), MANUAL_API_TOKEN,
   MAILWAIN_BASE_URL, MAILWAIN_API_KEY, ALERT_TO, DRY_RUN (default true),
-  BUDGET_TOTAL_24H (500), BUDGET_MANUAL_24H (50), BUDGET_REDDIT_24H (100).
+  BUDGET_TOTAL_24H (500), BUDGET_MANUAL_24H (50), BUDGET_SEARCH_24H (100).
 
 Prisma schema exactly per architecture-spec §7 (Signal, Fingerprint,
 AdapterRun, TaxonomySnapshot). Initial migration via migrate dev against
@@ -73,8 +73,8 @@ local Postgres only. NEVER point prisma at a non-local database.
 
 DmClientModule:
   - postSignal(candidate → payload):
-    * assign signalId "{shortcode}_{ULID}" (man_/rdt_ by adapterKey),
-      sourceKey from GENERATOR_SOURCE_KEY
+    * assign signalId "{shortcode}_{ULID}" (man_/srch_ by adapterKey,
+      config-driven map), sourceKey from GENERATOR_SOURCE_KEY
     * write Signal row status=pending BEFORE first network attempt
     * validate payload with dmSignalPayloadSchema; failure →
       status=rejected_schema, no send

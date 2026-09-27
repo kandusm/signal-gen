@@ -11,11 +11,10 @@
 `signalgen` is a standalone service that observes external content sources, normalizes observations into signals, and posts them to Design Manager's `POST /api/signals` endpoint. It is fire-and-forget upstream of DM: all matching, review, commissioning, and advertising happens downstream in DM / Design Pipeline / AdPush.
 
 ### Goals (v1)
-- Generate real, taxonomy-aligned signals from three sources: calendar/seasonal, manual entry, Reddit
+- Generate real, taxonomy-aligned signals from two sources: manual entry, web search (Brave Search API)
 - Never violate DM's rate contract (10/min, 500/day)
 - Never post duplicate signals for the same underlying trend within a suppression window
-- Zero-ops deployment on existing self-hosted Linux infrastructure
-- Serve as the team-training vehicle for Chris (brief-driven workflow, adapter ownership)
+- Serve as the team-training vehicle for Chris (brief-driven workflow, vertical-slice ownership)
 
 ### Non-goals (v1)
 - Feedback/outcome consumption from DM (telemetry hooks only)
@@ -30,9 +29,8 @@
 
 ```mermaid
 flowchart LR
-    CAL[Calendar adapter] --> PIPE[signalgen pipeline]
-    MAN[Manual entry adapter] --> PIPE
-    RED[Reddit adapter] --> PIPE
+    MAN[Manual entry adapter] --> PIPE[signalgen pipeline]
+    SRCH[Search adapter - Brave] --> PIPE
     PIPE -->|POST /api/signals\nbearer Api:SignalKey| DM[Design Manager\n.NET 4.7.2 / IIS / SQL Server]
     PIPE -->|GET /api/secondarydesigns/categories| DM
     DM --> DP[Design Pipeline\nASP.NET Core 8]
@@ -41,9 +39,9 @@ flowchart LR
 ```
 
 - **DM** consumes signals, runs three-tier matching (taxonomy → keyword → Claude ranking), routes to human review.
-- **signalgen** is outbound-only. No public ingress. Manual entry surface is LAN/VPN-scoped.
+- **signalgen** runs on Fly.io. Public surface is minimal: `/manual/signals` (bearer token) and `/healthz`; everything else is outbound.
 - **MailWain** (our transactional email service) delivers operational alerts.
-- Strategic note: AdPush already integrates Reddit Ads. Reddit-sourced signals can be advertised back into the communities they came from.
+- Strategic note: the search watchlist can target Reddit content (`site:reddit.com/r/…` queries — Brave's index retained Reddit access when other engines lost it in 2024; freshness to be observed in dry-run). AdPush already integrates Reddit Ads, so Reddit-observed signals can still be advertised back into the communities they came from. Direct Reddit Data API access is a future adapter pending commercial approval (§15).
 
 ---
 
@@ -57,16 +55,19 @@ flowchart LR
 | Database | Postgres on Supabase, via Prisma | CommVergent platform standard (matches AdPush et al.); managed backups; Prisma matches AdPush |
 | DB location | Dedicated Supabase project `signalgen` (not shared with AdPush) | Per-service project isolation; blast radius and key rotation stay independent |
 | DB connections | Prisma `DATABASE_URL` = Supavisor pooled string (`?pgbouncer=true`), `directUrl` = direct connection for migrations | Standard Supabase+Prisma gotcha; low connection count but pooler is free insurance |
-| Deployment | Docker container on existing self-hosted Linux host, docker compose, restart `unless-stopped` | Outbound-only service — Fly.io's ingress/anycast value is zero here; runs free on owned infra |
+| Deployment (service) | Fly.io, single machine (`count=1`), Dockerfile deploy | Portfolio consistency with AdPush; puts manual-entry endpoint reachable for Chris without VPN plumbing |
+| Deployment (web) | Next.js on Vercel (Phase 4: manual-entry UI + read-only ops views) | Portfolio standard pairing |
+| Migrations | Prisma Migrate — `migrate dev` against local Docker Postgres, `migrate deploy` in Fly release command against Supabase | Supabase shadow-DB friction avoided; prod schema changes ride the deploy, reviewable as SQL |
+| Cron safety | Exactly one Fly machine + `pg_advisory_lock` per adapter run | Guards against double-fire if machine count ever drifts |
 | Config/secrets | `.env` on host (not in image), validated at boot with zod; fail-fast on invalid config | Standard; no secrets manager warranted at this scale |
 | HTTP client | Native `fetch` + thin wrappers | No axios/snoowrap dependencies; Reddit client is ~100 lines |
 | IDs | ULID for `signalId` | Sortable, collision-safe, generated locally before post |
 | Logging | pino, structured JSON → container stdout → journald | Grep-able; no log infra needed |
 | Alerting | MailWain transactional email | Eat our own dog food; already deployed |
 
-**Deliberately rejected:** message queue (BullMQ/Redis) — 500 signals/day ceiling makes it overengineering; in-process pipeline with a DB-backed ledger gives the same durability. SQLite — zero-ops appeal loses to portfolio standardization on Supabase Postgres.
+**Deliberately rejected:** message queue (BullMQ/Redis) — 500 signals/day ceiling makes it overengineering; in-process pipeline with a DB-backed ledger gives the same durability. SQLite — portfolio standardization on Supabase Postgres. Self-hosted Docker — superseded by Fly.io for portfolio consistency and public reachability of the manual/ops surfaces.
 
-**Accepted tradeoff:** the service is self-hosted but its state is cloud-hosted, so Supabase unavailability stalls the pipeline. Acceptable because every adapter run is idempotent and self-healing (calendar lookahead, Reddit re-poll, ULIDs persisted pre-post) — a stalled run is skipped work, not lost work. DB errors fail the run, alert on 3 consecutive, and the next cron recovers.
+**Resilience note:** every adapter run is idempotent and self-healing (Reddit re-poll, ULIDs persisted pre-post) — a stalled run from Supabase/Fly disruption is skipped work, not lost work. DB errors fail the run, alert on 3 consecutive, and the next cron recovers.
 
 ---
 
@@ -96,9 +97,8 @@ src/
   dm/                # DM client: auth, rate limiter, taxonomy cache, POST w/ retries
   pipeline/          # validation, taxonomy alignment, fingerprint, dedup, budget, dispatch
   adapters/
-    calendar/
     manual/
-    reddit/
+    search/
   persistence/       # Prisma schema, repositories
   notify/            # MailWain alert client
   health/            # GET /healthz (LAN only)
@@ -112,7 +112,10 @@ Adding a source = new directory under `adapters/`, one module registration. Noth
 
 ```typescript
 interface SourceAdapter {
-  /** Stable sourceKey sent to DM, e.g. "calendar", "manual", "reddit" */
+  /** Internal adapter key ("manual", "search") — used for ledger, fingerprints,
+   *  budget caps. NOT the wire sourceKey: DM's sourceKey identifies the
+   *  generator instance and is the fixed constant "signalgen-v1" for all
+   *  signals; the observation source travels in platform/subplatform. */
   readonly key: string;
   /** Cron expression; null for push-style adapters (manual) */
   readonly schedule: string | null;
@@ -120,6 +123,8 @@ interface SourceAdapter {
   fetch(ctx: RunContext): Promise<CandidateSignal[]>;
 }
 ```
+
+**signalId convention:** `{shortcode}_{ULID}` (`man_…`, `srch_…`) — per DM's prefix recommendation, ≤64 chars, generated and persisted before first POST.
 
 **Contract rules:**
 - Adapters emit `CandidateSignal` — the normalized internal shape mirroring DM's contract (required: `sourceKey`, `topic`, `tone`, `platform`, `capturedAt`; recommended fields as available; source-specific detail in `extensions`).
@@ -131,7 +136,11 @@ interface SourceAdapter {
 
 DM exposes `GET /api/secondarydesigns/categories` (valid Category/Subcategory/Tone). Pipeline caches this with a 6-hour TTL and a persisted snapshot (survives DM downtime at boot).
 
-Adapters SHOULD map to valid taxonomy values when confident (calendar events are pre-mapped; Reddit uses a curated keyword→taxonomy map). When not confident, emit the raw topic + `keywords[]` and set `extensions.taxonomyAligned = false` — DM's tier-2 keyword and tier-3 Claude matching exist precisely for this. Pipeline validation is therefore:
+Per the endpoint docs: unknown Category/Subcategory values do **not** reject a signal (Tier 2/3 still match, Tier 1 doesn't fire), but an unrecognized **tone** returns 400. Policy therefore splits:
+- **tone** — validated against the cached taxonomy *before* post; invalid tone is a pipeline rejection, never sent (a 400 would be `failed_permanent`)
+- **topic/subtopic** — adapters SHOULD map to valid Category/Subcategory when confident (manual entry selects from the live taxonomy; Reddit uses a curated keyword→taxonomy map); when not confident, emit raw topic + `keywords[]` and set `extensions.taxonomyAligned = false`
+
+Pipeline validation outcomes:
 - **Schema-invalid** → rejected, never posted, logged
 - **Taxonomy-aligned** → posted with `extensions.taxonomyAligned = true`
 - **Not aligned but schema-valid** → posted, flagged false
@@ -140,11 +149,17 @@ Adapters SHOULD map to valid taxonomy values when confident (calendar events are
 
 ## 6. DM client
 
-- **Auth:** `Api:SignalKey` bearer from env.
-- **Rate limiting:** token bucket at 10/min plus a persistent daily counter (500/day). Both enforced client-side *before* dispatch; 429s from DM are treated as a bug in our accounting and alerted.
-- **Daily budget allocation:** per-adapter caps from config so one noisy source can't starve others. Initial: reddit ≤ 100/day, calendar ≤ 50/day, manual ≤ 50/day, remainder reserved headroom. ⚠ **Open question OQ-3:** confirm whether DM's daily window is rolling 24h or calendar-day, and in which timezone — the counter reset must match.
-- **Idempotency:** `signalId` (ULID) is generated and persisted to the ledger *before* the first POST attempt. Retries reuse it; DM's idempotency makes retries safe.
-- **Retry schedule** on 5xx/network: 1m → 5m → 30m → 2h → 6h, then park as `failed` + MailWain alert. 4xx (except 429) is `failed_permanent` immediately + alert — it means our payload or contract understanding is wrong.
+- **Auth:** `Api:SignalKey` bearer from env. `Idempotency-Key` header = `signalId` on every POST (per docs).
+- **Rate limiting:** token bucket at 10/min plus a **trailing-24h rolling count** from the ledger (`posted` in last 24h < 500, per-adapter caps likewise). Rolling accounting is strictly conservative under both possible DM window semantics (rolling or calendar-day), which closes OQ-3 without needing DM's internal answer. Both enforced client-side *before* dispatch.
+- **Daily budget allocation:** per-adapter caps from config so one noisy source can't starve others. Initial: search ≤ 100, manual ≤ 50 per trailing 24h, remainder reserved headroom. Bursts buffer and drain within the per-minute budget (docs require self-throttling).
+- **Response semantics** (per docs):
+  - `202 ACCEPTED` → `posted`
+  - `200 DUPLICATE` → `posted`, but logged as an anomaly counter — local dedup should have prevented the resend
+  - `400 VALIDATION_FAILED` / `401` → `failed_permanent` + alert (contract drift or key rotation)
+  - `429` → honor `Retry-After`, then retry; alert regardless — any 429 means our accounting is wrong
+  - `5xx`/network → retry schedule below
+- **Idempotency:** `signalId` is generated and persisted to the ledger *before* the first POST attempt. Retries reuse it; DM guarantees exactly-once processing on `signalId`, so at-least-once delivery from our side is correct by design.
+- **Retry schedule** on 5xx/network: 1m → 5m → 30m → 2h → 6h, then park as `failed` + MailWain alert.
 - **Dry-run mode:** `DRY_RUN=true` runs the full pipeline including ledger writes but skips the POST, recording `status=dry_run`. This is the safety valve for a no-staging environment and the default mode for every new adapter's first deploy.
 
 ---
@@ -153,27 +168,28 @@ Adapters SHOULD map to valid taxonomy values when confident (calendar events are
 
 ```prisma
 model Signal {
-  id            String   @id            // ULID = signalId sent to DM
+  id            String   @id            // "{shortcode}_{ULID}" = signalId sent to DM
   fingerprint   String
-  sourceKey     String
+  adapterKey    String                  // internal: manual|reddit (wire sourceKey is the fixed generator id)
   topic         String
   subtopic      String?
   tone          String
   platform      String
   payload       Json                    // full body as posted
-  status        String                  // pending|posted|suppressed|dry_run|failed|failed_permanent|rejected_schema
+  status        String                  // pending|posted|suppressed|dry_run|failed|failed_permanent|rejected_schema|rejected_tone
   attempts      Int      @default(0)
   dmStatusCode  Int?
-  dmResponse    String?
+  dmResponse    Json?
   createdAt     DateTime @default(now())
   postedAt      DateTime?
   @@index([fingerprint])
-  @@index([sourceKey, createdAt])
+  @@index([adapterKey, createdAt])
+  @@index([status, postedAt])           // trailing-24h budget query
 }
 
 model Fingerprint {
-  hash               String   @id       // sha256 of normalized (sourceKey|topic|subtopic)
-  sourceKey          String
+  hash               String   @id       // sha256 of normalized (adapterKey|topic|subtopic)
+  adapterKey         String
   firstSeenAt        DateTime
   lastSeenAt         DateTime
   lastPostedSignalId String?
@@ -192,12 +208,6 @@ model AdapterRun {
   @@index([adapterKey, startedAt])
 }
 
-model DailyBudget {
-  day        String  @id               // YYYY-MM-DD in DM's rate window TZ (OQ-3)
-  totalUsed  Int     @default(0)
-  byAdapter  Json                      // map adapterKey -> count
-}
-
 model TaxonomySnapshot {
   id        Int      @id @default(autoincrement())
   fetchedAt DateTime
@@ -205,45 +215,42 @@ model TaxonomySnapshot {
 }
 ```
 
+No budget table: rolling-24h enforcement is an indexed count over `Signal` (`status=posted, postedAt > now()-24h`, grouped by adapterKey) — one source of truth, no counter drift.
+
 The `Signal` table is the **telemetry hook**: every posted signalId lives here, so a future DM outcome endpoint joins on it with zero redesign. Signals and runs are retained indefinitely for now — dataset stays small; add a pruning policy if it ever matters.
 
 ---
 
 ## 8. Dedup & decay policy
 
-- **Fingerprint:** `sha256(sourceKey | lowercase(trim(topic)) | lowercase(trim(subtopic ?? "")))`
+- **Fingerprint:** `sha256(adapterKey | material)` where the material is **adapter-defined**:
+  - manual: `lowercase(trim(topic)) | lowercase(trim(subtopic ?? ""))`
+  - search: canonicalized result URL (scheme/host lowercased, tracking params stripped) — each distinct piece of content emits at most once
 - **Suppression windows (per source class, config-driven):**
-  - calendar: fingerprint includes the event year → natural annual recurrence, no explicit window
-  - reddit: 21 days from post
+  - search: 21 days per URL fingerprint; plus a per-query emission cap (`maxCandidatesPerRun`, default 3) so one hot query can't flood a run
   - manual: 7 days (humans repeating themselves quickly is usually intentional; short window)
 - Suppressed candidates are recorded (`status=suppressed`) so we can see what dedup is eating.
-- **Decay hints (`signalDecayHint`):**
-  - calendar: the event date itself
-  - reddit: `capturedAt + 10 days`
-  - manual: operator-supplied, default `capturedAt + 14 days`
+- **Decay hints (`signalDecayHint`):** DM's contract is the enum `IMMEDIATE | SHORT | EVERGREEN`, not a date.
+  - search: `SHORT`
+  - manual: operator-selected, default `SHORT`
 - Escalation refires are explicitly out of v1. If added later: new signalId, prior signalId referenced in `extensions.escalationOf`.
 
 ---
 
 ## 9. v1 adapters
 
-### 9.1 Calendar (`sourceKey: "calendar"`, cron: daily 06:00)
-- Static event registry as a versioned TS data file: `{ name, month/day or nth-weekday rule, leadDays, taxonomy mapping (category/subcategory/tone), keywords, audience }`.
-- Initial registry targets occupation-pride and hobbyist events: Nurses Week, Skilled Trades Day, Father's/Mother's Day, Teacher Appreciation, EMS Week, Linemen Appreciation Day, National Welding Month, Woodworking-adjacent observances, etc. (Registry content is its own review task — Chris drafts it.)
-- Daily run scans a 90-day lookahead; emits a candidate when `today >= eventDate - leadDays`. Lookahead + fingerprint-with-year means missed runs (host down) self-heal on next run.
-- `leadDays` defaults: 45 (allows commission path through Design Pipeline), overridable per event.
-- Zero auth, zero external calls. **This is the Chris-led adapter (Phase 2).**
-
-### 9.2 Manual (`sourceKey: "manual"`, push-style, no cron)
+### 9.1 Manual (`sourceKey: "manual"`, push-style, no cron)
 - Two surfaces, same code path:
-  - CLI: `signalgen manual:submit --topic ... --tone ...` (nest-commander) on the host
-  - `POST /manual/signals` — LAN/VPN-bound HTTP endpoint, static bearer token, zod-validated
-- ⚠ **Open question OQ-2:** does Chris need remote submission? If yes, endpoint goes behind the existing reverse proxy with auth; if no, LAN-only binding stands.
+  - `POST /manual/signals` — public Fly endpoint, static bearer token (`MANUAL_API_TOKEN`), zod-validated, rate-limited (Nest throttler)
+  - Phase 3 web UI (Vercel) calls the same endpoint server-side; token never reaches the browser
+- Until the UI exists, submission is curl/httpie from anywhere with the token — resolves former OQ-2 (Chris remote access) without VPN.
 
-### 9.3 Reddit (`sourceKey: "reddit"`, cron: daily 07:00)
-- OAuth2 client-credentials script app; thin custom client (token refresh + fetch), well under Reddit's 100 QPM.
-- Config-driven **watchlist**: `{ subreddit, keywordSet[], taxonomyMapping, minScore, minComments }`. Watchlist lives in a config file for v1 (reviewable in git); DB-backed only if a management UI ever exists.
-- Per run: pull `top?t=day` + `hot` (first pages) per watchlist subreddit; candidate when a post matches a keywordSet and clears score/comment thresholds. `platform: "reddit"`, `subplatform: subreddit`, `sourceUrl`, `sourceAuthor`, `sourceExcerpt` (truncated ≤ 500 chars), `engagementMetrics: { score, comments, upvoteRatio }`.
+### 9.2 Search (`sourceKey` internal: "search", cron: daily 07:00)
+- **Brave Search API**: single GET endpoint, `X-Subscription-Token` header, native fetch. $5/1k requests with $5 monthly credit; a ~30-query daily watchlist stays inside the credit. Commercial use permitted; **attribution required** — "Search powered by Brave" lands in the Phase 3 web app footer.
+- Config-driven **watchlist**: `{ queryKey, query, freshness: "pd"|"pw", maxCandidatesPerRun, taxonomyMapping, keywords[], audience }`. Queries may be open-web or Reddit-scoped (`site:reddit.com/r/Welding <terms>`). Reddit coverage via Brave is expected (2024 exception) but unverified for freshness — **the dry-run ledger is the test**: first live watchlist runs in DRY_RUN show exactly how many Reddit-scoped queries return week-fresh results; thin results are a watchlist config change, not a code change.
+- Per result → candidate: topic/subtopic/tone from the query's `taxonomyMapping`; `sourceExcerpt` = result snippet (≤500 chars); `sourceUrl` = result URL; **platform derivation from URL**: `reddit.com/r/X/...` → `platform: "Reddit"`, `subplatform: "r/X"`; otherwise `platform: "Web"`, `subplatform: <domain>`. `signalDecayHint: "SHORT"`, signalId `srch_{ULID}`, `extensions: { queryKey, rank, freshness }`.
+- **No engagement metrics** — search results carry none; `engagementMetrics` omitted (contract-optional). Candidate selection is presence + freshness + rank, throttled by `maxCandidatesPerRun`.
+- Data handling: store only what we post (snippet-capped); no bulk archival of result sets.
 - Rolling engagement baselines per subreddit (percentile thresholds) are v2; v1 thresholds are hand-tuned per subreddit in the watchlist.
 - Data handling: store only what we post (excerpt-length capped); no bulk archival of Reddit content — keeps us inside Reddit API terms.
 - ⚠ **Open question OQ-4:** initial subreddit watchlist — draft against Sartorial's actual best-selling occupation segments.
@@ -253,7 +260,7 @@ The `Signal` table is the **telemetry hook**: every posted signalId lives here, 
 ## 10. Observability & operations
 
 - **Logs:** pino JSON, one line per pipeline decision (candidate id, stage, outcome).
-- **Health:** `GET /healthz` (LAN) — DB reachable, last successful run per adapter, taxonomy snapshot age, today's budget usage.
+- **Health:** `GET /healthz` wired to Fly health checks — DB reachable, last successful run per adapter, taxonomy snapshot age, today's budget usage.
 - **MailWain alerts:**
   - any `failed_permanent` (contract drift — highest severity)
   - adapter with 3 consecutive failed runs
@@ -267,16 +274,16 @@ The `Signal` table is the **telemetry hook**: every posted signalId lives here, 
 
 ## 11. Security & data handling
 
-- Outbound-only; the only listeners are `/healthz` and `/manual/signals`, both LAN/VPN-bound. No public ingress, no TLS termination needed on-box (LAN) unless OQ-2 changes this.
-- Secrets in host `.env`: `DATABASE_URL`, `DIRECT_URL`, `DM_SIGNAL_KEY`, `REDDIT_CLIENT_ID/SECRET`, `MANUAL_API_TOKEN`, `MAILWAIN_*`. Never in image or repo. Supabase service keys are not needed — Prisma over the Postgres connection only; RLS off (no client-side access exists).
+- Public listeners limited to `/manual/signals` (bearer + throttled) and `/healthz`; TLS terminated by Fly. Everything else outbound.
+- Secrets via `fly secrets` (service) and Vercel env (web): `DATABASE_URL`, `DIRECT_URL`, `DM_SIGNAL_KEY`, `BRAVE_API_KEY`, `MANUAL_API_TOKEN`, `MAILWAIN_*`. Never in image or repo. Supabase service keys not needed — Prisma over the Postgres connection only; RLS off (no client-side DB access exists).
 - Stored third-party content is limited to what DM receives (excerpt-capped). Public content only; no PII beyond public usernames in `sourceAuthor`.
 
 ---
 
 ## 12. Testing strategy
 
-- **Unit:** adapter normalization + taxonomy mapping (calendar date rules get table-driven tests — nth-weekday logic is where bugs live); fingerprint canonicalization; budget accounting.
-- **Contract:** a zod schema mirroring DM's `POST /api/signals` contract is the single source of truth; every candidate validates against it in tests and at runtime. ⚠ **OQ-1:** paste the field-by-field contract from the previous thread so this schema is exact, not reconstructed.
+- **Unit:** adapter normalization + taxonomy mapping; fingerprint canonicalization; budget accounting.
+- **Contract:** a zod schema mirroring DM's `POST /api/signals` contract is the single source of truth; every candidate validates against it in tests and at runtime. DM's endpoints are built, tested, and documented — the schema derives verbatim from that documentation (committed as `docs/dm-contract.md`), not reconstructed.
 - **Integration:** no DM sandbox exists → dry-run mode is the integration harness. Each adapter ships with a `--dry-run` rehearsal producing a reviewable ledger before its first real post.
 - **No staging:** first real post of each adapter is a supervised single-signal run (budget cap temporarily set to 1).
 
@@ -286,17 +293,17 @@ The `Signal` table is the **telemetry hook**: every posted signalId lives here, 
 
 | Phase | Scope | Stop condition | Lead |
 |---|---|---|---|
-| **0** | Scaffold, config+zod, Prisma+SQLite, DM client (auth, limiter, taxonomy cache, POST w/ retries), ledger, dry-run mode, healthz, MailWain notifier | Hand-built candidate passes schema + taxonomy validation in dry-run; one supervised real signal lands in DM's review queue | Kandus writes brief; Chris reviews brief + code walk |
-| **1** | Pipeline core: fingerprint/dedup, suppression windows, budget allocator + manual adapter (CLI + endpoint) | Manual signal posts; identical resubmission within window is suppressed and visible in ledger | Kandus writes brief; Chris reviews |
-| **2** | Calendar adapter + event registry | 90-day lookahead dry-run emits correct signal set (hand-verified against registry); one supervised real post | **Chris writes brief, drives Claude Code; Kandus reviews** |
-| **3** | Reddit adapter + watchlist | Dry-run over live watchlist stays within caps, candidates correctly mapped or flagged unaligned; supervised real post | Pair: Chris drafts, Kandus co-reviews |
+| **0** | Scaffold, config+zod, Prisma+Supabase, DM client (auth, limiter, taxonomy cache, POST w/ retries), ledger, dry-run mode, healthz, MailWain notifier | Hand-built candidate passes schema + taxonomy validation in dry-run; one supervised real signal lands in DM's review queue | Kandus writes brief; Chris reviews brief + code walk |
+| **1** | Pipeline core: fingerprint/dedup, suppression windows, budget allocator + manual adapter (endpoint) | Manual signal posts; identical resubmission within window is suppressed and visible in ledger | Kandus writes brief; Chris reviews |
+| **2** | Search adapter (Brave) + query watchlist | DRY_RUN over live watchlist stays within caps, mappings verified, Reddit-scoped query freshness measured from the ledger; supervised real post | Pair: Chris drafts, Kandus co-reviews |
+| **3** | Vercel web app: manual-entry form + read-only ops views (ledger, runs, budget) | Chris submits a manual signal through the UI; ledger/run views reflect live data | **Chris writes brief, drives Claude Code; Kandus reviews** |
 
 Each phase gets its own implementation brief with explicit scope and stop conditions per standard workflow. Nothing beyond Phase 3 is committed.
 
 ### Team-training map
 - Phase 0–1: Chris learns to *read* briefs and review diffs (brief anatomy, stop conditions, why dry-run exists)
-- Phase 2: Chris owns a vertical slice end-to-end — brief authorship → Claude Code execution → review → supervised deploy
-- Phase 3: pairing on an adapter with real external-API concerns (auth, rate limits, ToS)
+- Phase 2: pairing on an adapter with real external-API concerns (auth, cost accounting, watchlist curation)
+- Phase 3: Chris owns a vertical slice end-to-end — brief authorship → Claude Code execution → review → supervised deploy
 
 ---
 
@@ -304,17 +311,18 @@ Each phase gets its own implementation brief with explicit scope and stop condit
 
 | # | Question | Blocking |
 |---|---|---|
-| OQ-1 | Paste field-by-field `POST /api/signals` contract from previous thread → exact zod schema | Phase 0 |
-| OQ-2 | Does Chris need remote manual-entry access (reverse proxy + auth) or is LAN/VPN sufficient? | Phase 1 |
-| OQ-3 | DM rate-window semantics: rolling 24h vs calendar day, and timezone | Phase 0 |
-| OQ-4 | Initial Reddit watchlist (subreddits + thresholds) from Sartorial's actual segment performance | Phase 3 |
-| OQ-5 | Which host on the Linux infra runs the container; confirm outbound egress to Supabase + Reddit + DM from that host | Phase 0 |
+| OQ-1 | ~~Endpoint contract~~ **Resolved:** documentation received; commit as `docs/dm-contract.md` | — |
+| OQ-2 | ~~Chris remote access~~ **Resolved:** public Fly endpoint + bearer token; UI in Phase 3 | — |
+| OQ-3 | ~~Rate-window semantics~~ **Resolved:** client enforces trailing-24h rolling counts — conservative under either DM interpretation | — |
+| OQ-4 | Initial search query watchlist (open-web + Reddit-scoped queries, taxonomy mappings) from Sartorial's actual segment performance | Phase 2 |
+| OQ-5 | Provisioning: Supabase project, Fly app + region + deploy token, GitHub repo, Brave API key (Phase 2), Vercel project (Phase 3) | Phase 0 |
 | OQ-6 | Alert recipients (you only, or Chris too) | Phase 0 |
 
 ---
 
 ## 15. Future (designed-for, not built)
 
+- **Reddit Data API adapter:** pending Reddit's commercial-access approval (application in flight — free tier is non-commercial only). On approval: OAuth2 client-credentials, subreddit polling with real engagement metrics, `rdt_` shortcode, public subreddits only per DM's do-not-send list. Slots into the adapter framework with zero pipeline changes; until then, Reddit-scoped search queries cover the gap.
 - **Feedback loop:** DM exposes an outcome endpoint (commissioned/advertised/discarded per signalId); signalgen joins on its ledger, surfaces per-adapter hit rates, eventually tunes thresholds. Ledger already carries everything needed.
 - **Escalation refires** per §8.
 - **Google Trends adapter** once official API access stabilizes.

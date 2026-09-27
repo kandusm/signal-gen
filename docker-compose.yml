@@ -1,0 +1,29 @@
+# Local Postgres for `prisma migrate dev`.
+#
+# This is the ONLY database Claude Code / local development points Prisma at.
+# Supabase never sees an experimental migration (build-plan.md section 3).
+services:
+  db:
+    image: postgres:16
+    container_name: signalgen-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: signalgen
+      POSTGRES_PASSWORD: signalgen
+      POSTGRES_DB: signalgen
+    ports:
+      # Bound to loopback: this database holds nothing precious, but it also
+      # has no business being reachable from the LAN.
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - signalgen-db-data:/var/lib/postgresql/data
+    healthcheck:
+      # `prisma migrate dev` fails confusingly against a server that is still
+      # starting, so compose waits for a real readiness check.
+      test: ['CMD-SHELL', 'pg_isready -U signalgen -d signalgen']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  signalgen-db-data:
