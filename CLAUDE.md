@@ -28,6 +28,10 @@ architecture-spec.md §3, §6 and §11.
   only. No key, token or connection string with a real password belongs in the
   repo, in a test fixture, or in a commit message. Staging a real value in
   `.env.local` is permitted (below); committing one never is.
+- **Never take a session-level advisory lock.** Advisory locks are
+  transaction-scoped only (`pg_try_advisory_xact_lock`, via
+  `AdvisoryLockService`): through Supabase's transaction pooler a
+  session-level unlock can land on a different backend and leave the lock held.
 - **Never add a queue library.** BullMQ/Redis were considered and rejected: at
   a 500/day ceiling the DB-backed ledger provides the same durability
   (architecture-spec.md section 3).

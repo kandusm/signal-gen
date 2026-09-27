@@ -136,12 +136,13 @@ interface SourceAdapter {
 
 DM exposes `GET /api/secondarydesigns/categories` (valid Category/Subcategory/Tone). Pipeline caches this with a 6-hour TTL and a persisted snapshot (survives DM downtime at boot).
 
-Per the endpoint docs: unknown Category/Subcategory values do **not** reject a signal (Tier 2/3 still match, Tier 1 doesn't fire), but an unrecognized **tone** returns 400. Policy therefore splits:
-- **tone** — validated against the cached taxonomy *before* post; invalid tone is a pipeline rejection, never sent (a 400 would be `failed_permanent`)
-- **topic/subtopic** — adapters SHOULD map to valid Category/Subcategory when confident (manual entry selects from the live taxonomy; Reddit uses a curated keyword→taxonomy map); when not confident, emit raw topic + `keywords[]` and set `extensions.taxonomyAligned = false`
+Ground truth (post-integration): DM validates almost nothing — unknown Category/Subcategory values pass through (Tier 2/3 still match, Tier 1 doesn't fire), and tone is publish-only: DM accepts any tone string and never 400s, but Tier 1 matching does an exact string compare of signal tone vs design tone, so only tones from DM's published list (`tones` in the categories response, config-sourced, omitted when unconfigured) produce tone matches. Policy therefore splits:
+- **tone** — validated against the published list *before* post as match-quality discipline; invalid tone is a pipeline rejection (`rejected_tone`), never sent. When DM publishes no tones, the gate degrades to skip (recorded in logs/healthz).
+- **topic/subtopic** — adapters SHOULD map to valid Category/Subcategory when confident (manual entry selects from the live taxonomy; search uses per-query taxonomy mappings); when not confident, emit raw topic + `keywords[]` and set `extensions.taxonomyAligned = false`
 
 Pipeline validation outcomes:
 - **Schema-invalid** → rejected, never posted, logged
+- **Policy-blocked** → `rejected_policy`, never posted: a config-driven denylist (repo-reviewed; `{pattern, match: word|substring, scope: topic|keywords|excerpt|all, reason}`, case-folded, word-boundary default) screens every candidate between schema validation and the tone gate. Matched rule recorded in the ledger row's `dmResponse` Json; no fingerprint write (denylist edits must take effect immediately); no alert — the ledger is the audit. Rationale: DM barely validates and its human reviewer is the only downstream guard, so the screen protects the 500/day budget, reviewer attention, and DM storage from disallowed topics (trademarks, tragedy/breaking-news terms, NSFW, competitor names). Ships with the search adapter (Phase 2); an AI moderation pass is future work, added only if the wordlist measurably leaks.
 - **Taxonomy-aligned** → posted with `extensions.taxonomyAligned = true`
 - **Not aligned but schema-valid** → posted, flagged false
 
@@ -176,7 +177,7 @@ model Signal {
   tone          String
   platform      String
   payload       Json                    // full body as posted
-  status        String                  // pending|posted|suppressed|dry_run|failed|failed_permanent|rejected_schema|rejected_tone
+  status        String                  // pending|posted|suppressed|dry_run|failed|failed_permanent|rejected_schema|rejected_tone|rejected_policy
   attempts      Int      @default(0)
   dmStatusCode  Int?
   dmResponse    Json?

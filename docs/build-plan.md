@@ -41,8 +41,9 @@ signalgen/
 ## 4. Deploy flow (no staging)
 
 1. Claude Code works on a branch; Kandus reviews diff; merge to `main`.
-2. Service: `fly deploy` manually by Kandus (Fly auth is his). Web: Vercel auto-deploy on `main` (P4+).
-3. `DRY_RUN=true` is the default for every new adapter until its supervised first post (budget cap temporarily 1, watch the ledger, flip the cap back).
+2. **Execution is CC's, trigger is Kandus's:** on Kandus's explicit go (per change, recorded in-session), CC runs `fly deploy` — the release command applies `prisma migrate deploy` against Supabase, so migrations ride deploys. CC may run `migrate deploy` directly (via the deliberate `migrate:deploy:remote` script) only for a schema change that must land without a code release. Web: Vercel auto-deploy on `main` (P3+).
+3. Hard lines that survive the rule change: `migrate dev` / `db push` / `reset` never touch Supabase (assert-local-db stays); migrations forward-only; after every deploy CC verifies `/healthz` and `prisma migrate status` and reports before continuing.
+4. `DRY_RUN=true` is the default for every new adapter until its supervised first post (budget cap temporarily 1, watch the ledger, flip the cap back).
 
 ## 5. Provisioning checklist (Kandus, before Phase 0 execution)
 
@@ -107,8 +108,8 @@ produces a dry_run ledger row end-to-end. Do not deploy; Kandus deploys.
 **Review gate:** Kandus reviews; Chris walks the pipeline with the ledger open.
 
 ### Phase 2 — Search adapter, Brave (pair: Chris drafts, Kandus co-reviews)
-**Scope:** thin Brave client (single GET, `X-Subscription-Token`, native fetch), config-file query watchlist (OQ-4: open-web + Reddit-scoped `site:reddit.com/r/…` entries, freshness pd/pw, `maxCandidatesPerRun`, taxonomy mappings), URL canonicalization + URL-based fingerprints (21-day suppression), platform derivation from result URL (`Reddit`/`r/X` vs `Web`/domain), snippet→sourceExcerpt ≤500, no engagementMetrics, search daily cap ≤ 100, `srch_` shortcode.
-**Stop conditions:** DRY_RUN over the live watchlist stays within caps with correct mappings; ledger review quantifies Reddit-scoped query freshness (this **is** the Brave-Reddit coverage test — thin results are a watchlist edit, not a code change); supervised real post; Brave error/quota-exhaustion path alerts.
+**Scope:** thin Brave client (single GET, `X-Subscription-Token`, native fetch), config-file query watchlist (OQ-4: open-web + Reddit-scoped `site:reddit.com/r/…` entries, freshness pd/pw, `maxCandidatesPerRun`, taxonomy mappings), URL canonicalization + URL-based fingerprints (21-day suppression), platform derivation from result URL (`Reddit`/`r/X` vs `Web`/domain), snippet→sourceExcerpt ≤500, no engagementMetrics, search daily cap ≤ 100, `srch_` shortcode, **policy screen** (pipeline stage per spec §5: repo-reviewed denylist, `rejected_policy` ledger rows; denylist content drafted with the watchlist — trademarks, tragedy terms, NSFW, competitors).
+**Stop conditions:** DRY_RUN over the live watchlist stays within caps with correct mappings; ledger review quantifies Reddit-scoped query freshness (this **is** the Brave-Reddit coverage test — thin results are a watchlist edit, not a code change) and shows the policy screen catching seeded denylist hits; supervised real post; Brave error/quota-exhaustion path alerts.
 **Note:** Brave attribution requirement is satisfied in Phase 3's web footer.
 
 ### Phase 2b — Reddit application (async, no code)
@@ -145,7 +146,7 @@ P0 → P1 sequential (P1 depends on client + ledger). P2 (Reddit) starts once P1
 - [ ] DM reachability from Fly: if DM's IIS ingress allowlists source IPs, Fly egress is dynamic — needs a Fly static egress IP or an open (auth-only) endpoint. Decide now, not at first deploy. (AdPush→DM calls may already answer this.)
 
 **Claude Code harness:**
-- [ ] `CLAUDE.md` at repo root: conventions, commands, and hard guardrails — never run migrations against Supabase, never deploy, never touch `fly.toml` secrets sections, local Docker Postgres only.
+- [ ] `CLAUDE.md` at repo root: conventions, commands, and hard guardrails. **CC operates deploys and migrations** (`fly deploy`; migrations via its release command, or `migrate:deploy:remote` for schema-only changes) — but only on Kandus's explicit in-session go after diff review, never self-initiated. Never `migrate dev`/`db push`/`reset` against Supabase; local Docker Postgres for all migration authoring; never edit `fly.toml` secrets sections; post-deploy verification (`/healthz` + `migrate status`) mandatory before proceeding.
 - [ ] `docs/architecture-spec.md` + `docs/build-plan.md` + `docs/dm-contract.md` committed before session 1; directives reference them.
 - [ ] `.env.example` complete. **Secrets policy (pre-production):** prod secrets MAY be staged in `apps/service/.env.local` for integration testing — gitignored, excluded from the Docker context, invisible to Prisma CLI (env split), and blocked from `migrate dev` by `assert-local-db.mjs`. `DRY_RUN=true` stays on in any environment holding them except supervised posts. **At production cutover:** remove staged secrets from dev, rotate `DM_SIGNAL_KEY` + MailWain key, and prod secrets live only in `fly secrets` / Vercel env thereafter.
 - [ ] Pin Node 22.x, pnpm version (packageManager field), Prisma version.
