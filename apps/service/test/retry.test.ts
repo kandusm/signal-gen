@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type Clock, fixedClock } from '../src/common';
 import {
+  BudgetService,
   DmClient,
   INLINE_RETRY_WAIT_CAP_MS,
   MAX_ATTEMPTS,
@@ -404,6 +405,8 @@ describe('DmClient — guards', () => {
     expect(status).toBe(SignalStatus.DRY_RUN);
     expect(h.signals.rows.get(signalId)?.status).toBe(SignalStatus.DRY_RUN);
     expect(h.signals.rows.get(signalId)?.attempts).toBe(0);
+    // Stamped as "would have been sent at", so the budget window counts it.
+    expect(h.signals.rows.get(signalId)?.postedAt).toEqual(NOW);
     expect(h.http.posts).toHaveLength(0);
   });
 
@@ -557,5 +560,99 @@ describe('DmClient — payload assembly', () => {
     await harness.dm.postSignal(candidate({ subtopic: undefined }));
     const payload = harness.http.posts[0]?.payload as Record<string, unknown>;
     expect('subtopic' in payload).toBe(false);
+  });
+});
+
+/**
+ * Phase 1 brief §1: DRY_RUN skips only the network call. These run against the
+ * real BudgetService over the in-memory ledger, so a dry_run row written by one
+ * submission is what the budget check sees on the next.
+ */
+describe('DmClient — DRY_RUN skips only the network call', () => {
+  function dryRunHarness(options: { manualBudget?: number; tones?: string[] } = {}) {
+    const clock = fixedClock(NOW);
+    const signals = new FakeSignalRepository(clock);
+    const http = new FakeDmHttpClient([]);
+    const notify = new FakeNotifyService();
+    const config = new FakeConfigService({
+      dryRun: true,
+      totalBudget24h: 500,
+      budgets: { manual: options.manualBudget ?? 50, search: 100 },
+    });
+    const tones = options.tones;
+    const taxonomy = tones
+      ? {
+          async isValidTone(tone: string) {
+            return tones.includes(tone);
+          },
+          peek() {
+            return { taxonomy: { categories: [], tones }, fetchedAt: NOW, fromSnapshot: false };
+          },
+        }
+      : permissiveTaxonomy;
+    const dm = new DmClient(
+      config as never,
+      http as never,
+      signals as never,
+      new BudgetService(config as never, signals as never),
+      new RateLimitService(clock),
+      taxonomy as never,
+      notify as never,
+      clock,
+    );
+    return { clock, signals, http, dm };
+  }
+
+  it('counts dry_run rows against the adapter cap and parks once it is reached', async () => {
+    const h = dryRunHarness({ manualBudget: 2 });
+
+    expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
+    expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
+    const third = await h.dm.postSignal(candidate());
+
+    expect(third.status).toBe(SignalStatus.PENDING);
+    expect(third.parkedReason).toBe('budget_exhausted');
+    expect(h.signals.rows.get(third.signalId)?.status).toBe(SignalStatus.PENDING);
+    expect(h.http.posts).toHaveLength(0);
+  });
+
+  it('consumes a rate-limit token, so an eleventh rehearsal in a minute parks', async () => {
+    const h = dryRunHarness();
+    for (let i = 0; i < 10; i += 1) {
+      expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
+    }
+
+    const eleventh = await h.dm.postSignal(candidate());
+
+    expect(eleventh.status).toBe(SignalStatus.PENDING);
+    expect(eleventh.parkedReason).toBe('rate_limited_local');
+    expect(h.http.posts).toHaveLength(0);
+  });
+
+  it('still runs the tone gate', async () => {
+    const h = dryRunHarness({ tones: ['Professional'] });
+    expect((await h.dm.postSignal(candidate({ tone: 'Sarcastic' }))).status).toBe(
+      SignalStatus.REJECTED_TONE,
+    );
+  });
+
+  it('does not count a rejected row against the budget', async () => {
+    const h = dryRunHarness({ manualBudget: 1, tones: ['Professional'] });
+    await h.dm.postSignal(candidate({ tone: 'Sarcastic' }));
+    expect((await h.dm.postSignal(candidate())).status).toBe(SignalStatus.DRY_RUN);
+  });
+
+  it('never relabels a row that already made a real attempt', async () => {
+    // A live attempt that hit a transport error may have landed at DM. Turning
+    // DRY_RUN back on must not rewrite it as dry_run.
+    const h = dryRunHarness();
+    h.signals.seed({ id: 'man_live', adapterKey: 'manual', status: SignalStatus.PENDING, attempts: 1 });
+
+    const result = await h.dm.dispatch(h.signals.rows.get('man_live') as never);
+
+    expect(result).toMatchObject({ status: SignalStatus.PENDING, parkedReason: 'dry_run_hold' });
+    expect(h.signals.rows.get('man_live')?.status).toBe(SignalStatus.PENDING);
+    expect(h.signals.rows.get('man_live')?.postedAt).toBeNull();
+    expect(h.http.posts).toHaveLength(0);
   });
 });

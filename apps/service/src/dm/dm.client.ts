@@ -46,7 +46,7 @@ export interface DispatchResult {
   signalId: string;
   status: SignalStatus;
   /** Why a row was left pending, when it was. */
-  parkedReason?: 'rate_limited_local' | 'budget_exhausted' | 'retry_scheduled';
+  parkedReason?: 'rate_limited_local' | 'budget_exhausted' | 'retry_scheduled' | 'dry_run_hold';
 }
 
 @Injectable()
@@ -76,9 +76,8 @@ export class DmClient {
    *                               rather than an unknown
    *   3. validate the payload     our own contract check; a failure here is a
    *                               bug we should never have put on the wire
-   *   4. tone gate                catches taxonomy drift before DM 400s
-   *   5. dry-run short-circuit    no network, no quota
-   *   6. rate guards, then POST   see dispatch()
+   *   4. tone gate                match-quality check against DM's taxonomy
+   *   5. rate guards, then POST   see dispatch(); DRY_RUN skips only the POST
    */
   async postSignal(candidate: CandidateSignal): Promise<DispatchResult> {
     const signalId = buildSignalId(
@@ -148,15 +147,6 @@ export class DmClient {
       this.logger.warn(`Tone gate skipped for ${signalId}: ${reason}`);
     }
 
-    // (5) Dry run. Checked before the rate guards on purpose: a rehearsal makes
-    // no DM request, so it consumes no DM quota and must not be blocked by a
-    // budget that exists to protect that quota.
-    if (this.config.dryRun) {
-      await this.signals.finalize(signalId, { status: SignalStatus.DRY_RUN });
-      this.logger.log(`DRY_RUN: ${signalId} ledgered as dry_run, not sent`);
-      return { signalId, status: SignalStatus.DRY_RUN };
-    }
-
     const row = await this.signals.findById(signalId);
     if (!row) throw new Error(`Ledger row ${signalId} vanished between write and dispatch`);
     return this.dispatch(row);
@@ -167,6 +157,11 @@ export class DmClient {
    *
    * Also the sweep's entry point for a row that was parked, which is why it
    * works from a persisted row rather than from a candidate.
+   *
+   * DRY_RUN skips only the POST (Phase 1 brief §1). Both guards still run, so
+   * a dry run consumes a token and parks on an exhausted budget exactly as a
+   * real post would — that is what makes adapter caps testable without
+   * posting.
    */
   async dispatch(signal: Signal): Promise<DispatchResult> {
     // Per-minute guard. Failing it is not an error; the sweep will come back.
@@ -190,7 +185,31 @@ export class DmClient {
       return { signalId: signal.id, status: SignalStatus.PENDING, parkedReason: 'budget_exhausted' };
     }
 
+    if (this.config.dryRun) return this.finishDryRun(signal);
+
     return this.attempt(signal, 0);
+  }
+
+  /**
+   * The dry-run end of dispatch: ledgered as though sent, but never sent.
+   *
+   * A row that has already made a real attempt is left pending instead. It may
+   * have reached DM (a transport error that actually landed), so calling it
+   * dry_run would be a lie — and switching DRY_RUN back on after a supervised
+   * post must not rewrite what that post did. A live run picks it up.
+   */
+  private async finishDryRun(signal: Signal): Promise<DispatchResult> {
+    if (signal.attempts > 0) {
+      this.logger.warn(
+        `${signal.id} held: ${signal.attempts} real attempt(s) already made; not finalising as dry_run`,
+      );
+      return { signalId: signal.id, status: SignalStatus.PENDING, parkedReason: 'dry_run_hold' };
+    }
+
+    // postedAt is when it would have been sent: the budget window reads it.
+    await this.signals.finalize(signal.id, { status: SignalStatus.DRY_RUN, postedAt: this.now() });
+    this.logger.log(`DRY_RUN: ${signal.id} ledgered as dry_run, not sent`);
+    return { signalId: signal.id, status: SignalStatus.DRY_RUN };
   }
 
   /** One network attempt plus its ledger consequence. */

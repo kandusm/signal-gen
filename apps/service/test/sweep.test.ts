@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fixedClock } from '../src/common';
 import { SWEEP_BATCH_SIZE, SweepService } from '../src/dm';
 import { SignalStatus } from '../src/persistence';
-import { FakeConfigService, FakeSignalRepository } from './helpers/fakes';
+import { FakeSignalRepository } from './helpers/fakes';
 
 const NOW = new Date('2026-09-20T12:00:00.000Z');
 
@@ -33,12 +33,11 @@ class FakeDmClient {
   }
 }
 
-function setup(options: { dryRun?: boolean; outcomes?: Map<string, { status: string; parkedReason?: string }> } = {}) {
+function setup(options: { outcomes?: Map<string, { status: string; parkedReason?: string }> } = {}) {
   const clock = fixedClock(NOW);
   const signals = new FakeSignalRepository(clock);
   const dm = new FakeDmClient(signals, options.outcomes);
-  const config = new FakeConfigService({ dryRun: options.dryRun ?? false });
-  const sweep = new SweepService(signals as never, dm as never, config as never, clock);
+  const sweep = new SweepService(signals as never, dm as never, clock);
   return { clock, signals, dm, sweep };
 }
 
@@ -67,7 +66,7 @@ describe('SweepService — drain order', () => {
     const summary = await sweep.sweep();
 
     expect(dm.dispatched).toEqual(['oldest', 'middle', 'newest']);
-    expect(summary).toEqual({ examined: 3, posted: 3, parked: 0, failed: 0 });
+    expect(summary).toEqual({ examined: 3, posted: 3, dryRun: 0, parked: 0, failed: 0 });
   });
 
   it('orders a retry-due row and a budget-parked row together by age', async () => {
@@ -168,7 +167,7 @@ describe('SweepService — budget and rate interaction', () => {
     const summary = await sweep.sweep();
 
     expect(dm.dispatched).toEqual(['search_row', 'manual_row']);
-    expect(summary).toEqual({ examined: 2, posted: 1, parked: 1, failed: 0 });
+    expect(summary).toEqual({ examined: 2, posted: 1, dryRun: 0, parked: 1, failed: 0 });
   });
 
   it('counts terminal failures separately', async () => {
@@ -180,19 +179,23 @@ describe('SweepService — budget and rate interaction', () => {
     const summary = await sweep.sweep();
 
     expect(dm.dispatched).toEqual(['doomed', 'fine']);
-    expect(summary).toEqual({ examined: 2, posted: 1, parked: 0, failed: 1 });
+    expect(summary).toEqual({ examined: 2, posted: 1, dryRun: 0, parked: 0, failed: 1 });
   });
 });
 
 describe('SweepService — cron behaviour', () => {
-  it('does nothing in DRY_RUN, where nothing is ever left pending', async () => {
-    const { signals, dm, sweep } = setup({ dryRun: true });
-    seedPending(signals, 'row', 10_000);
+  it('drains in DRY_RUN too, counting dry_run outcomes separately', async () => {
+    // Phase 1 brief §1: a dry run can be parked by a guard like a real post,
+    // so the sweep must come back for it. DmClient.dispatch is what skips the
+    // network; the sweep does not need to know.
+    const outcomes = new Map([['rehearsal', { status: SignalStatus.DRY_RUN }]]);
+    const { signals, dm, sweep } = setup({ outcomes });
+    seedPending(signals, 'rehearsal', 10_000);
 
     const summary = await sweep.sweep();
 
-    expect(dm.dispatched).toEqual([]);
-    expect(summary.examined).toBe(0);
+    expect(dm.dispatched).toEqual(['rehearsal']);
+    expect(summary).toEqual({ examined: 1, posted: 0, dryRun: 1, parked: 0, failed: 0 });
   });
 
   it('skips a tick while the previous pass is still running', async () => {

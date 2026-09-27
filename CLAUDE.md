@@ -48,6 +48,13 @@ architecture-spec.md §3, §6 and §11.
 - **`DRY_RUN` defaults to true.** Every new adapter's first deploy runs in
   dry-run. A missing or unparseable value must never resolve to "post for
   real".
+- **`DRY_RUN` skips only the network call** (Phase 1 brief §1). Schema
+  validation, the tone gate, dedup, the rate guards and the ledger write all
+  run. A `dry_run` row counts toward the trailing-24h budgets (total and
+  per-adapter) exactly as `posted` does, with `postedAt` stamped as when it
+  would have been sent; `suppressed`, `rejected_*` and `failed*` never count.
+  That is what makes adapter caps testable without posting. A row that has
+  already made a real attempt is never relabelled `dry_run`.
 - **Reuse `@signalgen/contract`.** The wire schema is defined once. Service
   validation, tests and the Phase 4 web form all import it, so drift is a type
   error rather than a production 400.
@@ -174,8 +181,9 @@ scaffold the next phase's features because they seem obvious — Phase 2 is
 Chris's vertical slice and Phase 3 is a pairing exercise, and pre-built
 scaffolding takes the learning out of both.
 
-Current phase: **0 — foundation**. Adapters, dedup/fingerprint suppression and
-the web app are explicitly out of scope.
+Current phase: **1 — pipeline core + manual adapter**
+(`docs/signalgen-phase-1-brief.md`). The search adapter, Brave client, cron
+adapters and the web app are explicitly out of scope.
 
 Roadmap, as revised: Phase 1 pipeline core + manual adapter; Phase 2 the Brave
 Search adapter (pair); Phase 3 the Vercel web app (Chris-led). The calendar

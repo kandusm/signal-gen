@@ -2,7 +2,7 @@ import { Inject, Injectable, Optional } from '@nestjs/common';
 import { CLOCK, type Clock, systemClock } from '../common';
 import { ConfigService } from '../config';
 import { BUDGET_WINDOW_MS, BudgetService, DM_REQUESTS_PER_MINUTE, RateLimitService, TAXONOMY_TTL_MS, TaxonomyService } from '../dm';
-import { PrismaService } from '../persistence';
+import { BUDGET_CONSUMING_STATUSES, PrismaService } from '../persistence';
 
 export interface BudgetLine {
   used: number;
@@ -26,6 +26,8 @@ export interface HealthReport {
   };
   budget: {
     windowHours: number;
+    /** Ledger states that `used` counts: posted and dry_run (Phase 1 brief §1). */
+    counts: readonly string[];
     total: BudgetLine;
     byAdapter: Record<string, BudgetLine>;
   } | null;
@@ -94,6 +96,7 @@ export class HealthService {
         }
         budget = {
           windowHours: BUDGET_WINDOW_MS / 3_600_000,
+          counts: BUDGET_CONSUMING_STATUSES,
           total: { used: usage.total, limit: this.config.totalBudget24h },
           byAdapter,
         };

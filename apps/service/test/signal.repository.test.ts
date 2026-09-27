@@ -35,13 +35,13 @@ describe('SignalRepository.usageSince', () => {
     expect(args.where.postedAt).not.toHaveProperty('gte');
   });
 
-  it('counts only rows that actually consumed DM quota', async () => {
+  it('counts posted and dry_run rows, and nothing else', async () => {
     const { repo, groupBy } = setup();
 
     await repo.usageSince(new Date());
 
     const args = groupBy.mock.calls[0]?.[0];
-    expect(args.where.status).toEqual({ in: [SignalStatus.POSTED] });
+    expect(args.where.status).toEqual({ in: [SignalStatus.POSTED, SignalStatus.DRY_RUN] });
     expect(args.by).toEqual(['adapterKey']);
   });
 

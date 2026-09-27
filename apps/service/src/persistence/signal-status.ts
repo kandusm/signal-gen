@@ -12,7 +12,7 @@ export const SignalStatus = {
   POSTED: 'posted',
   /** Dedup suppressed it. Phase 1. */
   SUPPRESSED: 'suppressed',
-  /** DRY_RUN was on; validated and ledgered, never sent. */
+  /** DRY_RUN was on; passed every guard, ledgered, never sent. */
   DRY_RUN: 'dry_run',
   /** Retry schedule exhausted. */
   FAILED: 'failed',
@@ -26,8 +26,17 @@ export const SignalStatus = {
 
 export type SignalStatus = (typeof SignalStatus)[keyof typeof SignalStatus];
 
-/** States that consume DM quota and therefore count against the budget. */
-export const BUDGET_CONSUMING_STATUSES: readonly SignalStatus[] = [SignalStatus.POSTED];
+/**
+ * States that count against the trailing-24h budgets.
+ *
+ * `dry_run` counts as well as `posted` (Phase 1 brief §1): a dry run passes
+ * every guard a real post would, so counting it makes adapter caps testable
+ * without posting. Suppressed, rejected and failed rows never count.
+ */
+export const BUDGET_CONSUMING_STATUSES: readonly SignalStatus[] = [
+  SignalStatus.POSTED,
+  SignalStatus.DRY_RUN,
+];
 
 /** States the sweep may pick up and dispatch. */
 export const DISPATCHABLE_STATUSES: readonly SignalStatus[] = [SignalStatus.PENDING];

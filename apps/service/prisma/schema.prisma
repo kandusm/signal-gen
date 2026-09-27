@@ -50,6 +50,8 @@ model Signal {
   /// When the sweep may next touch this row. Null means "eligible now".
   nextAttemptAt DateTime? @db.Timestamptz(3)
   createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  /// When DM accepted it — or, for dry_run, when it would have been sent.
+  /// The trailing-24h budget window is measured on this column.
   postedAt      DateTime? @db.Timestamptz(3)
 
   @@index([fingerprint])

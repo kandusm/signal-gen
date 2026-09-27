@@ -1,7 +1,7 @@
 import type { Signal } from '@prisma/client';
 import type { Alert } from '../../src/notify';
 import type { CreatePendingInput, TerminalUpdate, UsageCounts } from '../../src/persistence';
-import { SignalStatus } from '../../src/persistence';
+import { BUDGET_CONSUMING_STATUSES, SignalStatus } from '../../src/persistence';
 import type { DmHttpResult } from '../../src/dm';
 
 /**
@@ -99,7 +99,7 @@ export class FakeSignalRepository {
     const byAdapter: Record<string, number> = {};
     let total = 0;
     for (const row of this.rows.values()) {
-      if (row.status !== SignalStatus.POSTED) continue;
+      if (!BUDGET_CONSUMING_STATUSES.includes(row.status as SignalStatus)) continue;
       if (!row.postedAt || row.postedAt.getTime() <= since.getTime()) continue;
       byAdapter[row.adapterKey] = (byAdapter[row.adapterKey] ?? 0) + 1;
       total += 1;

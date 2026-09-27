@@ -35,14 +35,21 @@ function seedPosted(
 }
 
 describe('BudgetService — trailing 24h counting', () => {
-  it('counts only posted rows', async () => {
+  it('counts posted and dry_run rows, and nothing else', async () => {
     const { signals, budget } = setup();
     seedPosted(signals, 'manual', 3, 60_000);
+    // Phase 1 brief §1: a dry run passed every guard a real post would, so it
+    // counts. That is what makes adapter caps testable without posting.
+    signals.seed({
+      id: 'dry_1',
+      adapterKey: 'manual',
+      status: SignalStatus.DRY_RUN,
+      postedAt: new Date(NOW.getTime() - 60_000),
+    });
 
-    // Rows in every other state make no DM request and consume no quota.
+    // Suppressed, rejected, failed and pending rows never count.
     for (const status of [
       SignalStatus.PENDING,
-      SignalStatus.DRY_RUN,
       SignalStatus.FAILED,
       SignalStatus.FAILED_PERMANENT,
       SignalStatus.REJECTED_SCHEMA,
@@ -58,8 +65,8 @@ describe('BudgetService — trailing 24h counting', () => {
     }
 
     const usage = await budget.usage(NOW);
-    expect(usage.total).toBe(3);
-    expect(usage.byAdapter['manual']).toBe(3);
+    expect(usage.total).toBe(4);
+    expect(usage.byAdapter['manual']).toBe(4);
   });
 
   it('breaks usage out per adapter', async () => {

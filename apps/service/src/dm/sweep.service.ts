@@ -1,7 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { CLOCK, type Clock, systemClock } from '../common';
-import { ConfigService } from '../config';
 import { SignalRepository, SignalStatus } from '../persistence';
 import { DmClient } from './dm.client';
 
@@ -18,6 +17,8 @@ export const SWEEP_BATCH_SIZE = 25;
 export interface SweepSummary {
   examined: number;
   posted: number;
+  /** Passed every guard with DRY_RUN on; ledgered, not sent. */
+  dryRun: number;
   parked: number;
   failed: number;
 }
@@ -42,7 +43,6 @@ export class SweepService {
   constructor(
     private readonly signals: SignalRepository,
     private readonly dm: DmClient,
-    private readonly config: ConfigService,
     @Optional() @Inject(CLOCK) private readonly now: Clock = systemClock,
   ) {}
 
@@ -61,7 +61,7 @@ export class SweepService {
       const summary = await this.sweep();
       if (summary.examined > 0) {
         this.logger.log(
-          `Sweep: examined=${summary.examined} posted=${summary.posted} ` +
+          `Sweep: examined=${summary.examined} posted=${summary.posted} dryRun=${summary.dryRun} ` +
             `parked=${summary.parked} failed=${summary.failed}`,
         );
       }
@@ -78,13 +78,7 @@ export class SweepService {
    * driven directly in tests and from a future replay command.
    */
   async sweep(): Promise<SweepSummary> {
-    const summary: SweepSummary = { examined: 0, posted: 0, parked: 0, failed: 0 };
-
-    if (this.config.dryRun) {
-      // Nothing in the ledger is awaiting dispatch in dry-run mode: postSignal
-      // finalises as dry_run without ever leaving a row pending.
-      return summary;
-    }
+    const summary: SweepSummary = { examined: 0, posted: 0, dryRun: 0, parked: 0, failed: 0 };
 
     const due = await this.signals.findDispatchable(this.now(), SWEEP_BATCH_SIZE);
 
@@ -95,6 +89,9 @@ export class SweepService {
       switch (result.status) {
         case SignalStatus.POSTED:
           summary.posted += 1;
+          break;
+        case SignalStatus.DRY_RUN:
+          summary.dryRun += 1;
           break;
         case SignalStatus.PENDING:
           summary.parked += 1;
