@@ -6,6 +6,9 @@ export const TAXONOMY_PATH = '/api/secondarydesigns/categories';
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
+/** So a stray HTML error page cannot bloat the ledger row. */
+export const RAW_BODY_MAX_LENGTH = 2000;
+
 /** A response actually came back, whatever its status. */
 export interface DmHttpResponse {
   kind: 'response';
@@ -77,21 +80,23 @@ export class DmHttpClient {
       return { kind: 'transport_error', message };
     }
 
-    const rawBody = await safeText(response);
+    // Parse the whole body, truncate only the copy kept for the ledger. The
+    // taxonomy response alone is ~2.7 KB; parsing a truncated copy turned every
+    // valid taxonomy into null.
+    const text = await safeText(response);
     return {
       kind: 'response',
       status: response.status,
       retryAfter: response.headers.get('retry-after'),
-      body: parseJson(rawBody),
-      rawBody,
+      body: parseJson(text),
+      rawBody: text.slice(0, RAW_BODY_MAX_LENGTH),
     };
   }
 }
 
-/** Truncated so a stray HTML error page cannot bloat the ledger row. */
 async function safeText(response: Response): Promise<string> {
   try {
-    return (await response.text()).slice(0, 2000);
+    return await response.text();
   } catch {
     return '';
   }
