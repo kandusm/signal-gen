@@ -168,14 +168,6 @@ they are load-bearing rather than decorative:
    `apps/service/.env.local` from a `COPY . .`. The prune stage deletes any
    that slip through anyway.
 
-> **TEMPORARY (2026-09-27, Kandus's ruling) — no real posts until DM's
-> idempotency fix is verified.** `DRY_RUN` stays `true` everywhere after the
-> Phase 1 supervised session. DM currently answers 201 with its own id instead
-> of 202 echoing ours, and does not yet dedup on `Idempotency-Key`/`signalId`,
-> so a retry after a transport error that actually landed can double-post.
-> Remove this note only once a replayed signalId is shown to return
-> `200 DUPLICATE`.
-
 **`DRY_RUN=true` is mandatory** in any environment holding staged secrets. The
 sole exception is a supervised first post: budget capped at 1, a human
 watching the ledger, both restored afterwards.
