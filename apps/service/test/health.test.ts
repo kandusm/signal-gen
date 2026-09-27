@@ -21,6 +21,7 @@ function setup(options: {
   fromSnapshot?: boolean;
   ageMs?: number;
   budgetThrows?: boolean;
+  failedAlerts?: number;
 } = {}) {
   const clock = fixedClock(NOW);
   const config = new FakeConfigService({ dryRun: true, budgets: { manual: 50, search: 100 } });
@@ -47,6 +48,7 @@ function setup(options: {
       : budget,
     new RateLimitService(clock),
     config as never,
+    { failedDeliveriesSince: () => options.failedAlerts ?? 0 } as never,
     clock,
   );
   return { health, signals };
@@ -98,6 +100,27 @@ describe('HealthService — status and issues', () => {
     const report = await setup({ budgetThrows: true }).health.report();
     expect(report.budget).toBeNull();
     expect(report.issues).toContain('budget usage could not be read');
+  });
+});
+
+describe('HealthService — alert delivery', () => {
+  it('degrades and says how many alerts failed to send', async () => {
+    const report = await setup({ failedAlerts: 2 }).health.report();
+    expect(report.status).toBe('degraded');
+    expect(report.issues).toEqual(['2 alert deliveries failed in last 24h']);
+    expect(report.alerts).toEqual({ failedDeliveries24h: 2 });
+  });
+
+  it('uses the singular for one', async () => {
+    expect((await setup({ failedAlerts: 1 }).health.report()).issues).toEqual([
+      '1 alert delivery failed in last 24h',
+    ]);
+  });
+
+  it('reports zero failures without an issue', async () => {
+    const report = await setup().health.report();
+    expect(report.alerts).toEqual({ failedDeliveries24h: 0 });
+    expect(report.issues).toEqual([]);
   });
 });
 

@@ -2,6 +2,7 @@ import { Inject, Injectable, Optional } from '@nestjs/common';
 import { CLOCK, type Clock, systemClock } from '../common';
 import { ConfigService } from '../config';
 import { BUDGET_WINDOW_MS, BudgetService, DM_REQUESTS_PER_MINUTE, RateLimitService, TAXONOMY_TTL_MS, TaxonomyService } from '../dm';
+import { ALERT_FAILURE_WINDOW_MS, NotifyService } from '../notify';
 import { BUDGET_CONSUMING_STATUSES, PrismaService } from '../persistence';
 
 export interface BudgetLine {
@@ -32,6 +33,8 @@ export interface HealthReport {
     byAdapter: Record<string, BudgetLine>;
   } | null;
   rateLimit: { perMinute: number; tokensAvailable: number };
+  /** Failed alert sends in the trailing 24h (in-memory; resets on restart). */
+  alerts: { failedDeliveries24h: number };
   /** Human-readable reasons behind a non-ok status. */
   issues: string[];
 }
@@ -54,6 +57,7 @@ export class HealthService {
     private readonly budget: BudgetService,
     private readonly rateLimit: RateLimitService,
     private readonly config: ConfigService,
+    private readonly notify: NotifyService,
     @Optional() @Inject(CLOCK) private readonly now: Clock = systemClock,
   ) {}
 
@@ -77,6 +81,15 @@ export class HealthService {
     // Independent of freshness: a taxonomy can be current and still carry no
     // tones, and then the tone gate is being skipped on every signal.
     if (state && !state.taxonomy.tones) issues.push('taxonomy has no tones; tone gate skipped');
+
+    // Alerts are the last line of defence: one that failed to send must not be
+    // discoverable only by grepping logs.
+    const failedAlerts = this.notify.failedDeliveriesSince(
+      new Date(checkedAt.getTime() - ALERT_FAILURE_WINDOW_MS),
+    );
+    if (failedAlerts > 0) {
+      issues.push(`${failedAlerts} alert deliver${failedAlerts === 1 ? 'y' : 'ies'} failed in last 24h`);
+    }
 
     let budget: HealthReport['budget'] = null;
     if (databaseReachable) {
@@ -124,6 +137,7 @@ export class HealthService {
         perMinute: DM_REQUESTS_PER_MINUTE,
         tokensAvailable: this.rateLimit.available(),
       },
+      alerts: { failedDeliveries24h: failedAlerts },
       issues,
     };
   }

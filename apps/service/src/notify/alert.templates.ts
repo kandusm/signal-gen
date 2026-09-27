@@ -8,9 +8,11 @@ export interface RenderedAlert {
 const SUBJECT_PREFIX = '[signalgen]';
 
 /**
- * Plain text, not HTML. These are operational alerts read on a phone at an
+ * Plain text at heart. These are operational alerts read on a phone at an
  * inconvenient hour; the useful content is the signalId and the ledger status,
- * and both should survive any mail client.
+ * and both should survive any mail client. MailWain requires an html (or
+ * template) body, so the same text also goes out as a <pre> block — see
+ * renderAlertHtml.
  */
 export function renderAlert(alert: Alert): RenderedAlert {
   switch (alert.kind) {
@@ -106,4 +108,18 @@ function field(label: string, value: string | number): string {
 
 function lines(...parts: string[]): string {
   return parts.join('\n');
+}
+
+/**
+ * The html part MailWain requires: the plain-text alert, escaped, in a <pre>
+ * so line breaks and alignment survive. Deliberately no styling or layout —
+ * the text is the alert; this is only its envelope.
+ */
+export function renderAlertHtml(text: string): string {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return `<pre style="font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap;">${escaped}</pre>`;
 }
