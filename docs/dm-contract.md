@@ -72,7 +72,7 @@ Key is issued via DM configuration (`Api:SignalKey`). One key per signal generat
 | capturedAt | ISO 8601 datetime | When the signal generator captured this observation |
 | sourceKey | string, ≤32 chars | Identifies the signal generator instance/version (e.g., `trend-monitor-v1`). One value per deployed generator |
 | topic | string, ≤128 chars | Primary subject. Should map to a Category in DM's taxonomy where possible |
-| tone | string | Should match a Tone in DM's taxonomy (GET /api/secondarydesigns/categories). DM does not validate it — see *Taxonomy sync → Tone* |
+| tone | string | SHOULD match a Tone from GET /api/secondarydesigns/categories exactly (drives Tier 1). Publish-only: DM never validates it or 400s on it — see *Taxonomy sync → Tone* |
 | platform | string | Where the signal was observed (LinkedIn, Reddit, TikTok, Twitter/X, Etsy, GoogleTrends, etc.) |
 
 ### Recommended
@@ -197,17 +197,25 @@ Returns current valid values:
 
 ### Tone
 
-`tones` is **optional** in the response. DM does not currently publish it; it
-will, from DM configuration. Until then the response carries categories only.
+Tones come from DM configuration (`Signals:Tones`), as shipped 2026-09-27:
 
-DM does not validate tone on `POST /api/signals`. The generator's tone gate
-exists for **match-quality discipline** — an unrecognised tone silently loses
-Tier 1 matching — not to avoid a 400. It therefore:
+- **Omitted when unconfigured.** If `Signals:Tones` is not set, the `tones` key
+  is absent from the response entirely — not `null`, not `[]`. `tones` is
+  therefore **optional** in the response schema.
+- **Order preserved.** The list is returned in configured order.
+- **Duplicates collapse, first spelling wins.** If the configuration lists the
+  same tone twice in different spellings, only the first appears.
+
+**Tone is publish-only.** `tone` on `POST /api/signals` SHOULD match an entry
+in the list, because that exact match drives Tier 1 matching. DM never
+validates it and never returns 400 for it. The generator's tone gate exists
+for **match-quality discipline**, not 400-avoidance. It therefore:
 
 - rejects a tone (`rejected_tone`) only when DM has published a tone list and
-  the tone is not on it;
-- skips, and does not reject, when there is no taxonomy at all or the taxonomy
-  carries no tones. `/healthz` reports the skip as a `degraded` issue so it is
+  the tone is not on it (exact, case-sensitive comparison — Tier 1 is an exact
+  match);
+- skips, and does not reject, when there is no taxonomy at all or the `tones`
+  key is absent. `/healthz` reports the skip as a `degraded` issue so it is
   never silent.
 
 Signal generator should fetch this on startup and refresh periodically (recommended: every 6h). Sending unknown Category/Subcategory/Tone values doesn't reject the signal — Tier 2 keyword matching and Tier 3 AI ranking still work — but Tier 1 taxonomy matching won't fire, reducing match quality.
